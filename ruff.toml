@@ -1,0 +1,10 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["B", "E", "F", "I", "UP"]
+ignore = [
+    "B008",
+    # The project rules intentionally use datetime.now(timezone.utc) for clarity.
+    "UP017",
+]
