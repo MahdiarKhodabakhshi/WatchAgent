@@ -1,0 +1,41 @@
+# Eval questions for the data-analysis skill.
+# Each entry specifies a question and deterministic grading criteria
+# based on the fixed seed data in seed_data.py.
+#
+# Grader fields:
+#   expect_contains  – answer must include this substring (case-insensitive)
+#   expect_numeric   – answer must include a number within `tolerance` of this value
+#   tolerance        – allowed numeric error (default 0.1)
+#   expect_tools     – tool_calls trace must include all listed tool names
+
+- q: "Which city had the most rapid_change events?"
+  expect_contains: "Toronto"
+  expect_tools: ["count_events_by_type", "query_events"]
+
+- q: "How many events are in the database in total?"
+  expect_numeric: 14
+  tolerance: 0
+
+- q: "How many severe events occurred?"
+  expect_numeric: 3
+  tolerance: 0
+
+- q: "What was the maximum temperature reading in Vancouver?"
+  expect_numeric: 12.8
+  tolerance: 0.1
+
+- q: "What is the mean wind speed in Ottawa over all readings?"
+  expect_numeric: 12.8
+  tolerance: 0.5
+  expect_tools: ["compute_statistics"]
+
+- q: "What was the minimum precipitation recorded in Toronto?"
+  expect_numeric: 0.0
+  tolerance: 0.01
+
+- q: "Which event type is the most common?"
+  expect_contains: "rapid_change"
+
+- q: "Compare temperatures across all three cities. Which is warmest?"
+  expect_contains: "Vancouver"
+  expect_tools: ["compare_cities"]
