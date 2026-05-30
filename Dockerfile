@@ -1,3 +1,11 @@
+FROM node:20-slim AS frontend
+
+WORKDIR /fe
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
@@ -11,6 +19,7 @@ RUN groupadd -r app && useradd -r -g app app
 WORKDIR /srv
 COPY --from=builder /root/.local /home/app/.local
 COPY app/ ./app/
+COPY --from=frontend /fe/dist ./app/static
 RUN mkdir -p /srv/data && chown -R app:app /srv /home/app
 
 USER app

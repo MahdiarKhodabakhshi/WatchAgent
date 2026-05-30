@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Query
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -77,3 +79,8 @@ def get_events(
         query = query.where(Event.city == city)
     query = query.order_by(Event.event_ts.desc()).limit(limit)
     return {"events": list(db.scalars(query).all())}
+
+
+_FRONTEND_DIST = Path(__file__).parent / "static"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")

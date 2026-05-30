@@ -1,0 +1,19 @@
+:root {
+  --bg: #0B0D0F;
+  --surface: #14171A;
+  --surface-2: #1B1F23;
+  --border: #262B30;
+  --text: #E6E8EA;
+  --text-muted: #8A9097;
+  --text-faint: #565C63;
+
+  --sev-info: #3B82F6;
+  --sev-warning: #E0A106;
+  --sev-severe: #E2433F;
+
+  --line-temp: #6BA8E0;
+  --line-apparent: #6BA8E0;
+  --line-wind: #5DCAA5;
+  --line-precip: #85B7EB;
+  --line-forecast: #8A9097;
+}

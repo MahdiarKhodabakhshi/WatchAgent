@@ -74,6 +74,14 @@ service; it is only used by the offline data-analysis Cursor skill.
 
 If port 8000 is already in use, set `HOST_PORT` in `.env` before starting Compose.
 
+### Dashboard
+
+The Docker image also builds a read-only React dashboard and serves it from the same FastAPI origin
+at `http://localhost:8000/`. The SPA consumes only the public `/health`, `/readings`, and `/events`
+endpoints with relative paths, so there is no CORS setup, API base URL, or frontend secret. It polls
+every 30 seconds with stale-while-revalidate caching and keeps city, time-window, event type, and
+severity filters in the URL.
+
 ### Backfill with historical data (fast testing)
 
 If you want to exercise the detector on a large dataset without waiting for live polling, you can
