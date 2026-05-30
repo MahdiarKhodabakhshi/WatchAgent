@@ -10,4 +10,8 @@ data/*.db-*
 dist/
 build/
 *.egg-info/
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/skills/
+.cursor/skills/data-analysis/__pycache__/
+IMPLEMENTATION_PLAN.md
