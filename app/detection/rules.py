@@ -11,7 +11,9 @@ from app.detection.statistics import (
     population_std,
     reading_ids,
     readings_within_hours,
+    same_local_hour_values,
 )
+from app.detection.timeofday import local_hour
 from app.detection.wmo import wmo_category, wmo_level
 
 METRICS = ("temperature_2m", "wind_speed_10m", "precipitation")
@@ -24,6 +26,9 @@ COMPARISON_METRICS = (
 RAPID_CHANGE_Z_WARNING = 2.5
 RAPID_CHANGE_Z_SEVERE = 3.5
 COMFORT_STD_MULTIPLIER = 2.0
+
+DIURNAL_WINDOW_DAYS = 14
+MIN_SAME_HOUR_SAMPLES = 7
 CROSS_CITY_MIN_GAP = {
     "temperature_2m": 5.0,
     "apparent_temperature": 5.0,
@@ -33,18 +38,36 @@ CROSS_CITY_MIN_GAP = {
 
 
 def detect_rapid_change(reading: Any, history: list[Any]) -> list[Event]:
-    window = readings_within_hours(reading, history, 24)
-    if len(window) < MIN_HISTORY_FOR_STATS:
+    target_hour = local_hour(reading.city, reading.observation_ts)
+    diurnal_window = readings_within_hours(reading, history, DIURNAL_WINDOW_DAYS * 24)
+    rolling_window = readings_within_hours(reading, history, 24)
+
+    if len(rolling_window) < MIN_HISTORY_FOR_STATS:
         return []
 
     events: list[Event] = []
     for metric in METRICS:
         current_value = getattr(reading, metric, None)
-        values = metric_values(window, metric)
-        if current_value is None or len(values) < MIN_HISTORY_FOR_STATS:
+        if current_value is None:
             continue
-        baseline_mean = mean(values)
-        baseline_std = population_std(values)
+
+        same_hour = (
+            same_local_hour_values(diurnal_window, metric, reading.city, target_hour)
+            if target_hour is not None
+            else []
+        )
+
+        if target_hour is not None and len(same_hour) >= MIN_SAME_HOUR_SAMPLES:
+            baseline_values = same_hour
+            baseline_kind = "diurnal_same_hour"
+        else:
+            baseline_values = metric_values(rolling_window, metric)
+            baseline_kind = "rolling_24h"
+
+        if len(baseline_values) < MIN_HISTORY_FOR_STATS:
+            continue
+        baseline_mean = mean(baseline_values)
+        baseline_std = population_std(baseline_values)
         if baseline_std <= 0:
             continue
 
@@ -58,7 +81,24 @@ def detect_rapid_change(reading: Any, history: list[Any]) -> list[Event]:
             "mean": round(baseline_mean, 3),
             "std": round(baseline_std, 3),
             "z_score": round(z_score, 3),
+            "baseline_kind": baseline_kind,
+            "baseline_n": len(baseline_values),
         }
+
+        if baseline_kind == "diurnal_same_hour":
+            reason = (
+                f"{_metric_label(metric)} {float(current_value):.1f} is "
+                f"{z_score:.1f} sigma from {reading.city}'s typical "
+                f"{target_hour}:00 local value "
+                f"({DIURNAL_WINDOW_DAYS}-day same-hour mean {baseline_mean:.1f})."
+            )
+        else:
+            reason = (
+                f"{_metric_label(metric)} {float(current_value):.1f} is "
+                f"{z_score:.1f} sigma from {reading.city}'s 24h mean "
+                f"of {baseline_mean:.1f}."
+            )
+
         events.append(
             Event(
                 city=reading.city,
@@ -67,12 +107,8 @@ def detect_rapid_change(reading: Any, history: list[Any]) -> list[Event]:
                 severity=severity,
                 metric=metric,
                 signal_values=signal_values,
-                reason=(
-                    f"{_metric_label(metric)} {float(current_value):.1f} is "
-                    f"{z_score:.1f} sigma from {reading.city}'s 24h mean "
-                    f"of {baseline_mean:.1f}."
-                ),
-                supporting_reading_ids=_supporting_ids(reading, window),
+                reason=reason,
+                supporting_reading_ids=_supporting_ids(reading, diurnal_window),
             )
         )
     return events
@@ -186,8 +222,24 @@ def detect_comfort_divergence(reading: Any, history: list[Any]) -> list[Event]:
     if current_gap is None:
         return []
 
-    window = readings_within_hours(reading, history, 48)
-    gaps = [gap for item in window if (gap := _comfort_gap(item)) is not None]
+    target_hour = local_hour(reading.city, reading.observation_ts)
+    diurnal_window = readings_within_hours(reading, history, DIURNAL_WINDOW_DAYS * 24)
+    rolling_window = readings_within_hours(reading, history, 48)
+
+    if target_hour is not None:
+        same_hour_gaps = _same_hour_comfort_gaps(
+            diurnal_window, reading.city, target_hour,
+        )
+    else:
+        same_hour_gaps = []
+
+    if target_hour is not None and len(same_hour_gaps) >= MIN_SAME_HOUR_SAMPLES:
+        gaps = same_hour_gaps
+        baseline_kind = "diurnal_same_hour"
+    else:
+        gaps = [gap for item in rolling_window if (gap := _comfort_gap(item)) is not None]
+        baseline_kind = "rolling_48h"
+
     if len(gaps) < MIN_HISTORY_FOR_STATS:
         return []
 
@@ -205,6 +257,8 @@ def detect_comfort_divergence(reading: Any, history: list[Any]) -> list[Event]:
         "threshold": round(threshold, 3),
         "temperature_2m": round(float(reading.temperature_2m), 3),
         "apparent_temperature": round(float(reading.apparent_temperature), 3),
+        "baseline_kind": baseline_kind,
+        "baseline_n": len(gaps),
     }
     return [
         Event(
@@ -218,7 +272,7 @@ def detect_comfort_divergence(reading: Any, history: list[Any]) -> list[Event]:
                 f"Apparent temperature differs from actual by {current_gap:.1f}C, "
                 f"above {reading.city}'s comfort threshold of {threshold:.1f}C."
             ),
-            supporting_reading_ids=_supporting_ids(reading, window),
+            supporting_reading_ids=_supporting_ids(reading, diurnal_window),
         )
     ]
 
@@ -276,6 +330,23 @@ def detect_cross_city_contrast(
                 )
             )
     return events
+
+
+def _same_hour_comfort_gaps(
+    window: list[Any], city: str, target_hour: int, tolerance: int = 1,
+) -> list[float]:
+    """Comfort gaps from readings whose local hour is within +/- tolerance of target_hour."""
+    out: list[float] = []
+    for r in window:
+        lh = local_hour(city, r.observation_ts)
+        if lh is None:
+            continue
+        dist = min((lh - target_hour) % 24, (target_hour - lh) % 24)
+        if dist <= tolerance:
+            gap = _comfort_gap(r)
+            if gap is not None:
+                out.append(gap)
+    return out
 
 
 def _comfort_gap(reading: Any) -> float | None:

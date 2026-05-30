@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.detection import detect
+from app.detection.rules import DIURNAL_WINDOW_DAYS
 from app.open_meteo import CITIES, City, fetch_city_reading
 from app.storage import (
     latest_peer_readings,
@@ -103,7 +104,10 @@ def process_reading(
             )
             return
 
-        history = recent_history(session, reading.city, before=reading.observation_ts, hours=48)
+        history = recent_history(
+            session, reading.city, before=reading.observation_ts,
+            hours=DIURNAL_WINDOW_DAYS * 24,
+        )
         peers = latest_peer_readings(
             session,
             exclude_city=reading.city,
