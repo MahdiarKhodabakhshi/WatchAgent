@@ -15,8 +15,10 @@ from app.detection.rules import DIURNAL_WINDOW_DAYS
 from app.open_meteo import CITIES, City, fetch_city_reading
 from app.storage import (
     latest_peer_readings,
+    matching_forecast,
     recent_history,
     store_events,
+    store_forecast_if_new,
     store_reading_if_new,
 )
 
@@ -51,7 +53,14 @@ async def poll_once(
                 trace_id=resolved_trace_id,
             )
             continue
-        process_reading(result, session_factory, resolved_trace_id)
+        reading_data, forecast_rows = result
+        process_reading(
+            reading_data,
+            session_factory,
+            resolved_trace_id,
+            settings=resolved_settings,
+            forecast_rows=forecast_rows,
+        )
 
 
 async def fetch_city_with_retries(
@@ -59,7 +68,7 @@ async def fetch_city_with_retries(
     city: City,
     settings: Settings,
     trace_id: str,
-) -> dict:
+) -> tuple[dict, list[dict]]:
     for attempt in range(1, settings.max_retries + 1):
         try:
             return await fetch_city_reading(client, city, settings)
@@ -91,7 +100,11 @@ def process_reading(
     reading_data: dict,
     session_factory: SessionFactory,
     trace_id: str,
+    *,
+    settings: Settings | None = None,
+    forecast_rows: list[dict] | None = None,
 ) -> None:
+    resolved_settings = settings or get_settings()
     with session_factory() as session:
         reading = store_reading_if_new(session, reading_data)
         if reading is None:
@@ -104,6 +117,16 @@ def process_reading(
             )
             return
 
+        if resolved_settings.enable_forecast_reconciliation and forecast_rows:
+            for fc_row in forecast_rows:
+                lead = fc_row.get("lead_hours", 0)
+                if (
+                    resolved_settings.forecast_lead_hours_min
+                    <= lead
+                    <= resolved_settings.forecast_lead_hours_max
+                ):
+                    store_forecast_if_new(session, fc_row)
+
         history = recent_history(
             session, reading.city, before=reading.observation_ts,
             hours=DIURNAL_WINDOW_DAYS * 24,
@@ -113,7 +136,22 @@ def process_reading(
             exclude_city=reading.city,
             at_or_before=reading.observation_ts,
         )
-        events = detect(reading, history, peers)
+
+        fc = None
+        if resolved_settings.enable_forecast_reconciliation:
+            fc = matching_forecast(
+                session,
+                reading.city,
+                reading.observation_ts,
+                resolved_settings.forecast_lead_hours_min,
+                resolved_settings.forecast_lead_hours_max,
+            )
+
+        events = detect(
+            reading, history, peers,
+            forecast=fc,
+            forecast_temp_threshold=resolved_settings.forecast_temp_divergence_c,
+        )
         stored_events = store_events(session, events)
         session.commit()
 
