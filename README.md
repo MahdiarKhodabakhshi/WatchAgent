@@ -189,21 +189,52 @@ current and previous reading.
 The implemented event types are:
 
 1. `rapid_change`: fires when temperature, wind, or precipitation is at least 2.5 standard
-   deviations from the city's recent 24-hour mean. Severity becomes `severe` at 3.5 standard
-   deviations.
+   deviations from the city's baseline. Severity becomes `severe` at 3.5 sigma.
 2. `sustained_extreme`: fires when the current reading and previous two readings are all in the
    same 5th or 95th percentile tail.
 3. `wmo_transition`: fires when WMO weather code category jumps by at least two severity levels.
 4. `comfort_divergence`: fires when apparent temperature diverges from actual temperature beyond
-   the city's rolling mean gap plus two standard deviations.
+   the city's baseline mean gap plus two standard deviations.
 5. `cross_city_contrast`: fires when the current city-peer metric gap exceeds the 95th percentile
    of recent comparable gaps and also clears a metric-specific minimum gap.
+6. `forecast_divergence`: fires when an observed reading diverges significantly from what was
+   forecast for that hour — either a temperature miss ≥ 6°C or a WMO weather code jump of ≥ 2
+   severity levels.
+
+### Diurnal-aware baselines
+
+A 24-hour rolling mean treats 3pm the same as 3am. In cities with large diurnal temperature swings,
+this creates false positives every warm afternoon. `rapid_change` and `comfort_divergence` now
+prefer a **same-local-hour baseline**: 14 days of readings at the same local hour (±1h, via
+`zoneinfo`). If at least 7 same-hour samples exist, the detector uses that distribution; otherwise
+it falls back to the rolling 24-hour (or 48-hour) window. Over real backfill data, 98% of
+`rapid_change` events use the diurnal baseline (see [EVALUATION.md](EVALUATION.md)).
+
+### Forecast reconciliation
+
+During each poll, the poller fetches current conditions **and** hourly forecasts in a single
+Open-Meteo API call. Forecasts for the next 3–12 hours are stored in a `forecasts` table with a
+`UNIQUE(city, target_ts)` constraint — only the earliest lead-time forecast is kept per hour,
+preserving the most informative prediction. When a reading arrives, the poller looks up whether a
+forecast exists for that exact hour and, if so, passes it to the pure `detect_forecast_divergence`
+detector. The feature ships behind `ENABLE_FORECAST_RECONCILIATION` (default true) so it can be
+toggled off without code changes.
 
 Implementation note: the plan describes a full historical pairwise distribution for
 `cross_city_contrast`. The detector contract in the same plan passes only the triggering city's
 history plus the latest peer readings. I preserved that pure function contract and compute a rolling
 gap baseline from the triggering city's history against each latest peer value. I also added
 metric-specific minimum gaps to avoid noisy alerts when the historical distribution is flat.
+
+### Evaluation
+
+Detector quality is documented in [EVALUATION.md](EVALUATION.md). It covers:
+
+- **Labeled scenarios**: 18 synthetic test cases with exact ground truth, yielding 100% precision
+  and recall. These run in CI as `tests/test_labeled_scenarios.py`.
+- **Characterization over backfill**: event rates, z-score distribution, diurnal baseline split,
+  and severity breakdown over ~90 days of real data. Honestly framed as characterization (no ground
+  truth), not accuracy claims.
 
 ## Cursor Setup
 
@@ -221,8 +252,16 @@ missing peers, and timezone-naive datetimes.
 
 Skills live in `.cursor/skills/`:
 
-- `data-analysis`: answers natural-language questions about stored readings and events via an
-  Anthropic tool-use loop with deterministic SQLAlchemy tools.
+- `data-analysis`: answers natural-language questions about stored readings and events. Implements
+  three agentic design patterns:
+  - **Tool Use**: a bounded ReAct loop (≤ 6 steps) with deterministic SQLAlchemy tools.
+  - **Reflection**: a verification pass after the main loop checks every numeric claim against the
+    tool-result trace, returning corrections if any (1 extra LLM call, 7 max total).
+  - **Grounded NL digest** (`digest.py`): gathers facts deterministically from the DB, then has the
+    LLM render only those facts into prose. Both the prose and raw facts are returned for
+    verification.
+  - **Eval suite** (`evals/`): 8 questions graded against a fixed seed database with structural and
+    value checks (no LLM grading). Manual only — requires an API key, never in CI.
 - `replay-detection`: re-runs current detection logic over stored readings without writing to the
   database.
 
@@ -269,6 +308,36 @@ ruff check app tests
 ```
 
 CI runs the same lint and test commands, then validates `docker build`.
+
+## Design Decisions & What I Deliberately Didn't Build
+
+**Deterministic detection over LLM detection.** The detectors are pure functions with no LLM in the
+loop. This makes every event reproducible, testable, and explainable without API costs or latency.
+The LLM is reserved for the data-analysis skill where natural-language flexibility adds value and
+the grounded-generation pattern prevents hallucination.
+
+**No multi-agent runtime.** A single-agent ReAct loop with bounded steps (6 + 1 reflection) is
+sufficient for the data-analysis use case. Multi-agent orchestration would add complexity without
+improving answer quality for the bounded set of SQL-backed tools.
+
+**No RAG.** The data lives in a structured SQLite database, not a document corpus. SQL queries over
+typed columns are more precise than embedding-based retrieval for questions like "max temperature
+in Vancouver." RAG would be appropriate if the system needed to search unstructured text, but that
+is not the case here.
+
+**Feature-flag forecasting.** Forecast reconciliation is gated behind
+`ENABLE_FORECAST_RECONCILIATION` rather than hard-coded. This lets operators disable it without a
+code change — useful during initial deployment or if the forecast API becomes unreliable. The
+forecasts table uses a `UNIQUE(city, target_ts)` constraint with an earliest-lead-wins policy so
+the most informative forecast is always the one compared against reality.
+
+**No new columns on existing tables.** The `forecasts` table is new, but `readings` and `events`
+are unchanged. This avoids the need for schema migrations on a deployed database, since the project
+does not include Alembic.
+
+**Honest evaluation framing.** `EVALUATION.md` separates ground-truthed labeled scenarios (exact
+precision/recall) from backfill characterization (event rates with no ground truth). Claiming
+accuracy on unlabeled data would be misleading; the split makes the distinction explicit.
 
 ## Things I Would Do With More Time
 
