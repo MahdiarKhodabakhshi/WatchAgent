@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 import sys
-import textwrap
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -380,99 +379,103 @@ def main() -> None:
     print(f"Figures written to {FIG_DIR}/")
 
     # --- Build EVALUATION.md ---
-    md = textwrap.dedent(f"""\
-    # WatchAgent — Detector Evaluation
+    scenario_table = "\n".join(scenario_details)
+    rates_table = event_rate_table_v2(results, readings_by_city)
+    sev_table = severity_table(results)
+    bl_split = baseline_kind_split(results)
+    fc_skill = forecast_skill(results, forecasts, readings_by_city)
+    fc_thresh = settings.forecast_temp_divergence_c
 
-    > **Regenerate**: after running `python -m app.backfill` to populate the DB,
-    > run `python scripts/evaluate.py` to recreate this file and all PNGs.
+    md = f"""# WatchAgent — Detector Evaluation
 
-    ## Method (what is and isn't ground-truthed)
+> **Regenerate**: after running `python -m app.backfill` to populate the DB,
+> run `python scripts/evaluate.py` to recreate this file and all PNGs.
 
-    This evaluation has two distinct layers:
+## Method (what is and isn't ground-truthed)
 
-    1. **Labeled scenarios** (Part A): {len(SCENARIOS)} hand-crafted synthetic
-       scenarios with known ground-truth event types. These run deterministically
-       in CI and yield exact precision/recall numbers. Every scenario controls
-       the history, peers, and forecast passed to the detectors, so the
-       expected output is fully specified.
+This evaluation has two distinct layers:
 
-    2. **Characterization over backfill** (Part B): the detectors are replayed
-       in-memory over ~90 days of real Open-Meteo data stored in the local
-       SQLite database. Because there is no ground-truth labeling for real
-       weather events, we report *event rates*, *distributions*, and *threshold
-       behaviour* — **not** accuracy. This is honest characterization, not a
-       claim of precision/recall on unlabeled data.
+1. **Labeled scenarios** (Part A): {len(SCENARIOS)} hand-crafted synthetic
+   scenarios with known ground-truth event types. These run deterministically
+   in CI and yield exact precision/recall numbers. Every scenario controls
+   the history, peers, and forecast passed to the detectors, so the
+   expected output is fully specified.
 
-    ## Labeled scenario results (precision / recall on controlled data)
+2. **Characterization over backfill** (Part B): the detectors are replayed
+   in-memory over ~90 days of real Open-Meteo data stored in the local
+   SQLite database. Because there is no ground-truth labeling for real
+   weather events, we report *event rates*, *distributions*, and *threshold
+   behaviour* — **not** accuracy. This is honest characterization, not a
+   claim of precision/recall on unlabeled data.
 
-    | Scenario | Expected | Actual | Status |
-    |---|---|---|---|
-    """)
-    md += "\n".join(scenario_details)
-    md += textwrap.dedent(f"""
+## Labeled scenario results (precision / recall on controlled data)
 
-    **Precision**: {precision:.1%} ({tp} TP, {fp} FP)
-    **Recall**: {recall:.1%} ({tp} TP, {fn} FN)
+| Scenario | Expected | Actual | Status |
+|---|---|---|---|
+{scenario_table}
 
-    ## Event rates over backfill ({total_readings} readings)
+**Precision**: {precision:.1%} ({tp} TP, {fp} FP)
+**Recall**: {recall:.1%} ({tp} TP, {fn} FN)
 
-    {event_rate_table_v2(results, readings_by_city)}
+## Event rates over backfill ({total_readings} readings)
 
-    ## Severity breakdown per type
+{rates_table}
 
-    {severity_table(results)}
+## Severity breakdown per type
 
-    ## Rapid-change z-score distribution
+{sev_table}
 
-    ![z-score histogram](evaluation/zscore_histogram.png)
+## Rapid-change z-score distribution
 
-    Events only fire above the warning threshold ({RAPID_CHANGE_Z_WARNING});
-    the histogram shows where fired events sit relative to the severe cutoff
-    ({RAPID_CHANGE_Z_SEVERE}).
+![z-score histogram](evaluation/zscore_histogram.png)
 
-    ## Diurnal baseline split
+Events only fire above the warning threshold ({RAPID_CHANGE_Z_WARNING});
+the histogram shows where fired events sit relative to the severe cutoff
+({RAPID_CHANGE_Z_SEVERE}).
 
-    For `rapid_change` events, how many used the 14-day same-local-hour
-    baseline vs the fallback rolling 24-hour window:
+## Diurnal baseline split
 
-    {baseline_kind_split(results)}
+For `rapid_change` events, how many used the 14-day same-local-hour
+baseline vs the fallback rolling 24-hour window:
 
-    After the diurnal fix, the events-by-local-hour distribution should
-    not be skewed toward warm afternoon hours:
+{bl_split}
 
-    ![Events by local hour](evaluation/events_by_local_hour.png)
+After the diurnal fix, the events-by-local-hour distribution should
+not be skewed toward warm afternoon hours:
 
-    ## Forecast skill: MAE and divergence counts
+![Events by local hour](evaluation/events_by_local_hour.png)
 
-    {forecast_skill(results, forecasts, readings_by_city)}
+## Forecast skill: MAE and divergence counts
 
-    ## Threshold justification
+{fc_skill}
 
-    - **rapid_change** uses z ≥ {RAPID_CHANGE_Z_WARNING} (warning) and z ≥ {RAPID_CHANGE_Z_SEVERE}
-      (severe). The z-score histogram above shows these thresholds sit in the
-      tail of the distribution — most readings fall well below, confirming
-      the detector is not over-sensitive.
-    - **sustained_extreme** uses p5/p95 percentile thresholds over a 48-hour
-      window with a 3-reading streak requirement, limiting false positives
-      to sustained outliers.
-    - **comfort_divergence** fires when the apparent-actual gap exceeds
-      mean + 2× std of recent gaps, a standard anomaly threshold.
-    - **forecast_divergence** uses a {settings.forecast_temp_divergence_c}°C temperature threshold
-      and ≥ 2 WMO-level jump for weather code mismatches — calibrated to
-      avoid nuisance alerts from small forecast inaccuracies.
+## Threshold justification
 
-    ## Limitations
+- **rapid_change** uses z ≥ {RAPID_CHANGE_Z_WARNING} (warning) and z ≥ {RAPID_CHANGE_Z_SEVERE}
+  (severe). The z-score histogram above shows these thresholds sit in the
+  tail of the distribution — most readings fall well below, confirming
+  the detector is not over-sensitive.
+- **sustained_extreme** uses p5/p95 percentile thresholds over a 48-hour
+  window with a 3-reading streak requirement, limiting false positives
+  to sustained outliers.
+- **comfort_divergence** fires when the apparent-actual gap exceeds
+  mean + 2× std of recent gaps, a standard anomaly threshold.
+- **forecast_divergence** uses a {fc_thresh}°C temperature threshold
+  and ≥ 2 WMO-level jump for weather code mismatches — calibrated to
+  avoid nuisance alerts from small forecast inaccuracies.
 
-    - Labeled scenarios are synthetic; they verify logic correctness but not
-      ecological validity against real weather phenomena.
-    - Backfill characterization has **no ground truth**. Event rates and
-      distributions are descriptive, not measures of accuracy.
-    - Cross-city contrast is sensitive to the p95 historical diff; cities with
-      correlated climates may produce fewer events than expected.
-    - The diurnal baseline requires ≥ 7 same-hour readings over 14 days;
-      gaps in polling cause fallback to the rolling window, which may be
-      noisier for cities with large diurnal temperature swings.
-    """)
+## Limitations
+
+- Labeled scenarios are synthetic; they verify logic correctness but not
+  ecological validity against real weather phenomena.
+- Backfill characterization has **no ground truth**. Event rates and
+  distributions are descriptive, not measures of accuracy.
+- Cross-city contrast is sensitive to the p95 historical diff; cities with
+  correlated climates may produce fewer events than expected.
+- The diurnal baseline requires ≥ 7 same-hour readings over 14 days;
+  gaps in polling cause fallback to the rolling window, which may be
+  noisier for cities with large diurnal temperature swings.
+"""
 
     EVAL_PATH.write_text(md)
     print(f"Written {EVAL_PATH}")
