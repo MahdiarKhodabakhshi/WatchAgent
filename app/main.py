@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -46,6 +47,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan, title="WatchAgent")
 
 
+def _utc_query_datetime(value: datetime | None, param_name: str) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise HTTPException(status_code=422, detail=f"{param_name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
 @app.get("/health", response_model=HealthResponse)
 def health(db: Session = Depends(get_db)) -> HealthResponse:
     return HealthResponse(
@@ -58,12 +67,20 @@ def health(db: Session = Depends(get_db)) -> HealthResponse:
 @app.get("/readings", response_model=ReadingsResponse)
 def get_readings(
     city: Annotated[CityName | None, Query()] = None,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, list[Reading]]:
+    start_utc = _utc_query_datetime(start, "start")
+    end_utc = _utc_query_datetime(end, "end")
     query = select(Reading)
     if city is not None:
         query = query.where(Reading.city == city)
+    if start_utc is not None:
+        query = query.where(Reading.observation_ts >= start_utc)
+    if end_utc is not None:
+        query = query.where(Reading.observation_ts <= end_utc)
     query = query.order_by(Reading.observation_ts.desc()).limit(limit)
     return {"readings": list(db.scalars(query).all())}
 
@@ -71,12 +88,20 @@ def get_readings(
 @app.get("/events", response_model=EventsResponse)
 def get_events(
     city: Annotated[CityName | None, Query()] = None,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, list[Event]]:
+    start_utc = _utc_query_datetime(start, "start")
+    end_utc = _utc_query_datetime(end, "end")
     query = select(Event)
     if city is not None:
         query = query.where(Event.city == city)
+    if start_utc is not None:
+        query = query.where(Event.event_ts >= start_utc)
+    if end_utc is not None:
+        query = query.where(Event.event_ts <= end_utc)
     query = query.order_by(Event.event_ts.desc()).limit(limit)
     return {"events": list(db.scalars(query).all())}
 

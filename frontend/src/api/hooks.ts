@@ -6,7 +6,7 @@ import type { DashboardCity, EventType, Severity, TimeWindow, WatchEvent } from 
 const REFRESH_INTERVAL_MS = 30_000;
 const STALE_TIME_MS = 25_000;
 
-function windowToMs(windowRange: TimeWindow): number {
+export function windowToMs(windowRange: TimeWindow): number {
   switch (windowRange) {
     case "24h":
       return 24 * 60 * 60 * 1000;
@@ -15,6 +15,15 @@ function windowToMs(windowRange: TimeWindow): number {
     case "14d":
       return 14 * 24 * 60 * 60 * 1000;
   }
+}
+
+function rangeForWindow(windowRange: TimeWindow) {
+  const end = new Date();
+  const start = new Date(end.getTime() - windowToMs(windowRange));
+  return {
+    start: start.toISOString(),
+    end: end.toISOString(),
+  };
 }
 
 function inWindow(timestamp: string, windowRange: TimeWindow): boolean {
@@ -37,7 +46,7 @@ export function useHealth() {
 export function useReadings(params: { city: DashboardCity; windowRange: TimeWindow }) {
   return useQuery({
     queryKey: ["readings", params.city, params.windowRange],
-    queryFn: () => fetchReadings({ city: params.city }),
+    queryFn: () => fetchReadings({ city: params.city, ...rangeForWindow(params.windowRange) }),
     refetchInterval: REFRESH_INTERVAL_MS,
     staleTime: STALE_TIME_MS,
     select: (data) => ({
@@ -60,7 +69,7 @@ export function useEvents(params: {
       params.eventTypes.join(","),
       params.severities.join(","),
     ],
-    queryFn: () => fetchEvents({ city: params.city }),
+    queryFn: () => fetchEvents({ city: params.city, ...rangeForWindow(params.windowRange) }),
     refetchInterval: REFRESH_INTERVAL_MS,
     staleTime: STALE_TIME_MS,
     select: (data) => {

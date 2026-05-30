@@ -19,6 +19,8 @@ interface EventFeedProps {
   onToggleSeverity: (severity: Severity) => void;
   onResetFilters: () => void;
   onRetry: () => void;
+  selectedEventId?: number;
+  onSelectEvent: (event: WatchEvent) => void;
 }
 
 function TypeChip({
@@ -89,6 +91,8 @@ export function EventFeed({
   onToggleSeverity,
   onResetFilters,
   onRetry,
+  selectedEventId,
+  onSelectEvent,
 }: EventFeedProps) {
   if (isError) {
     return (
@@ -148,7 +152,12 @@ export function EventFeed({
       ) : (
         <div className="space-y-3">
           {events.map((event) => (
-            <EventCard key={event.id} event={event} />
+            <EventCard
+              key={event.id}
+              event={event}
+              selected={event.id === selectedEventId}
+              onSelect={onSelectEvent}
+            />
           ))}
         </div>
       )}

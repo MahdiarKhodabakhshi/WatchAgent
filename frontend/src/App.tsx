@@ -1,9 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { useEvents, useHealth, useReadings } from "./api/hooks";
 import type { Reading, WatchEvent } from "./api/types";
+import { ChartGrid } from "./components/ChartGrid";
 import { CityFilter } from "./components/CityFilter";
 import { ConditionsStrip } from "./components/ConditionsStrip";
+import { EventDetail } from "./components/EventDetail";
 import { EventFeed } from "./components/EventFeed";
 import { HealthBar } from "./components/HealthBar";
 import { TimeWindow } from "./components/TimeWindow";
@@ -26,6 +28,7 @@ function newestPolledAt(readings: { polled_at: string }[]): string | undefined {
 }
 
 export default function App() {
+  const [selectedEventId, setSelectedEventId] = useState<number | undefined>();
   const params = useDashboardParams();
   const healthQuery = useHealth();
   const readingsQuery = useReadings({
@@ -42,6 +45,10 @@ export default function App() {
   const readings = readingsQuery.data?.readings ?? EMPTY_READINGS;
   const events = eventsQuery.data?.events ?? EMPTY_EVENTS;
   const latestPolledAt = useMemo(() => newestPolledAt(readings), [readings]);
+  const selectedEvent = useMemo(
+    () => events.find((event) => event.id === selectedEventId),
+    [events, selectedEventId],
+  );
   const coldStart = healthQuery.data?.readings_stored === 0;
 
   return (
@@ -88,6 +95,16 @@ export default function App() {
         onRetry={() => void readingsQuery.refetch()}
       />
 
+      <ChartGrid
+        readings={readings}
+        events={events}
+        isLoading={readingsQuery.isPending}
+        isError={readingsQuery.isError}
+        selectedEventId={selectedEventId}
+        onSelectEvent={(event) => setSelectedEventId(event.id)}
+        onRetry={() => void readingsQuery.refetch()}
+      />
+
       <EventFeed
         events={events}
         isLoading={eventsQuery.isPending}
@@ -102,7 +119,11 @@ export default function App() {
         onToggleSeverity={params.toggleSeverity}
         onResetFilters={params.resetEventFilters}
         onRetry={() => void eventsQuery.refetch()}
+        selectedEventId={selectedEventId}
+        onSelectEvent={(event) => setSelectedEventId(event.id)}
       />
+
+      <EventDetail event={selectedEvent} onClose={() => setSelectedEventId(undefined)} />
     </main>
   );
 }

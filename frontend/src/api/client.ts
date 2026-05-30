@@ -52,11 +52,15 @@ export function fetchHealth(): Promise<HealthResponse> {
 
 export function fetchReadings(params: {
   city: DashboardCity;
+  start?: string;
+  end?: string;
   limit?: number;
 }): Promise<ReadingsResponse> {
   return readJson<ReadingsResponse>(
     pathWithParams("/readings", {
       city: cityParam(params.city),
+      start: params.start,
+      end: params.end,
       limit: params.limit ?? DEFAULT_LIMIT,
     }),
     "Readings",
@@ -65,11 +69,15 @@ export function fetchReadings(params: {
 
 export function fetchEvents(params: {
   city: DashboardCity;
+  start?: string;
+  end?: string;
   limit?: number;
 }): Promise<EventsResponse> {
   return readJson<EventsResponse>(
     pathWithParams("/events", {
       city: cityParam(params.city),
+      start: params.start,
+      end: params.end,
       limit: params.limit ?? DEFAULT_LIMIT,
     }),
     "Events",

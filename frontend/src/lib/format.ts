@@ -7,6 +7,12 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
   minute: "2-digit",
 });
 
+const chartTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+});
+
 export function round(value: number, digits = 1): string {
   return value.toLocaleString(undefined, {
     maximumFractionDigits: digits,
@@ -33,6 +39,11 @@ export function fmtTime(value: string | null | undefined): string {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "--" : timeFormatter.format(date);
+}
+
+export function fmtChartTime(value: number): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "--" : chartTimeFormatter.format(date);
 }
 
 export function fmtRelative(value: string | null | undefined): string {
@@ -88,4 +99,8 @@ export function windowLabel(value: TimeWindow): string {
 
 export function severityVar(value: Severity): string {
   return `var(--sev-${value})`;
+}
+
+export function metricLabel(value: string): string {
+  return value.replace(/_/g, " ");
 }

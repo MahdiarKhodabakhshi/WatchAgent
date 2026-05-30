@@ -13,7 +13,8 @@
     "@tanstack/react-query": "^5.62.8",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

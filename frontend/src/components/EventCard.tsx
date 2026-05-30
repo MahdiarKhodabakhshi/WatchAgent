@@ -11,16 +11,24 @@ const severityIcons: Record<Severity, LucideIcon> = {
 
 interface EventCardProps {
   event: WatchEvent;
+  selected?: boolean;
+  onSelect: (event: WatchEvent) => void;
 }
 
-export function EventCard({ event }: EventCardProps) {
+export function EventCard({ event, selected = false, onSelect }: EventCardProps) {
   const Icon = severityIcons[event.severity];
   const tone = severityVar(event.severity);
 
   return (
-    <article
-      className="border border-l-4 border-border bg-surface p-4 [border-bottom-right-radius:8px] [border-top-right-radius:8px]"
+    <button
+      type="button"
+      onClick={() => onSelect(event)}
+      className={[
+        "w-full border border-l-4 border-border bg-surface p-4 text-left transition-colors [border-bottom-right-radius:8px] [border-top-right-radius:8px]",
+        selected ? "bg-surface-2" : "hover:border-text-faint",
+      ].join(" ")}
       style={{ borderLeftColor: tone }}
+      aria-label={`Inspect ${event.event_type} event for ${event.city}`}
     >
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="inline-flex h-7 items-center rounded-panel border border-border bg-surface-2 px-2 text-xs uppercase tracking-label text-text-muted">
@@ -57,6 +65,6 @@ export function EventCard({ event }: EventCardProps) {
           <div className="mono-num">{event.supporting_reading_ids.length}</div>
         </div>
       </div>
-    </article>
+    </button>
   );
 }
