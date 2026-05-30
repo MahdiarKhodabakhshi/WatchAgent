@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.detection.base import Event as DetectionEvent
-from app.models import Event, Reading
+from app.models import Event, Forecast, Reading
 from app.open_meteo import CITY_NAMES
 
 
@@ -114,6 +114,48 @@ def store_events(
     session.add_all(rows)
     session.flush()
     return rows
+
+
+def store_forecast_if_new(
+    session: Session,
+    forecast_data: Mapping[str, Any],
+) -> Forecast | None:
+    """Store a forecast row, keeping the earliest lead for each (city, target_ts)."""
+    existing = session.scalar(
+        select(Forecast).where(
+            Forecast.city == forecast_data["city"],
+            Forecast.target_ts == forecast_data["target_ts"],
+        )
+    )
+    if existing is not None:
+        return None
+
+    forecast = Forecast(**dict(forecast_data))
+    session.add(forecast)
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        return None
+    return forecast
+
+
+def matching_forecast(
+    session: Session,
+    city: str,
+    target_ts: datetime,
+    min_lead: int,
+    max_lead: int,
+) -> Forecast | None:
+    """Return the stored forecast for (city, target_ts) if its lead is within bounds."""
+    return session.scalar(
+        select(Forecast).where(
+            Forecast.city == city,
+            Forecast.target_ts == target_ts,
+            Forecast.lead_hours >= min_lead,
+            Forecast.lead_hours <= max_lead,
+        )
+    )
 
 
 def count_readings(session: Session) -> int:

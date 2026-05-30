@@ -32,6 +32,12 @@ CURRENT_VARIABLES = (
     "weather_code",
 )
 HOURLY_VARIABLES = CURRENT_VARIABLES
+FORECAST_HOURLY_VARIABLES = (
+    "temperature_2m",
+    "precipitation",
+    "weather_code",
+    "wind_speed_10m",
+)
 
 
 def observation_time_to_utc(time_value: str, utc_offset_seconds: int) -> datetime:
@@ -71,23 +77,85 @@ def normalize_current_response(
     }
 
 
+def normalize_forecast_hourly_response(
+    city_name: str,
+    payload: dict[str, Any],
+    *,
+    issued_at: datetime,
+) -> list[dict[str, Any]]:
+    """Parse the hourly forecast block into a list of forecast row dicts."""
+    hourly = payload.get("hourly")
+    if not isinstance(hourly, dict):
+        return []
+
+    time_values = hourly.get("time")
+    if not isinstance(time_values, list):
+        return []
+
+    offset = int(payload.get("utc_offset_seconds", 0))
+
+    def _opt_list(name: str) -> list[Any]:
+        series = hourly.get(name)
+        if not isinstance(series, list) or len(series) != len(time_values):
+            return [None] * len(time_values)
+        return series
+
+    temps = _opt_list("temperature_2m")
+    precip = _opt_list("precipitation")
+    wind = _opt_list("wind_speed_10m")
+    codes = _opt_list("weather_code")
+
+    rows: list[dict[str, Any]] = []
+    for idx, ts_str in enumerate(time_values):
+        if not isinstance(ts_str, str):
+            continue
+        target_ts = observation_time_to_utc(ts_str, offset)
+        lead_seconds = (target_ts - issued_at).total_seconds()
+        lead_hours = int(round(lead_seconds / 3600))
+        rows.append(
+            {
+                "city": city_name,
+                "target_ts": target_ts,
+                "issued_at": issued_at,
+                "lead_hours": lead_hours,
+                "temperature_2m": _optional_float(temps[idx]),
+                "precipitation": _optional_float(precip[idx]),
+                "wind_speed_10m": _optional_float(wind[idx]),
+                "weather_code": _optional_int(codes[idx]),
+            }
+        )
+    return rows
+
+
 async def fetch_city_reading(
     client: httpx.AsyncClient,
     city: City,
     settings: Settings | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     resolved_settings = settings or get_settings()
-    response = await client.get(
-        resolved_settings.open_meteo_base_url,
-        params={
-            "latitude": city.latitude,
-            "longitude": city.longitude,
-            "current": ",".join(CURRENT_VARIABLES),
-            "timezone": "auto",
-        },
-    )
+    params: dict[str, Any] = {
+        "latitude": city.latitude,
+        "longitude": city.longitude,
+        "current": ",".join(CURRENT_VARIABLES),
+        "timezone": "auto",
+    }
+    if resolved_settings.enable_forecast_reconciliation:
+        params["hourly"] = ",".join(FORECAST_HOURLY_VARIABLES)
+        params["forecast_hours"] = resolved_settings.forecast_lead_hours_max
+
+    response = await client.get(resolved_settings.open_meteo_base_url, params=params)
     response.raise_for_status()
-    return normalize_current_response(city.name, response.json())
+    payload = response.json()
+
+    reading = normalize_current_response(city.name, payload)
+    forecasts = (
+        normalize_forecast_hourly_response(
+            city.name, payload, issued_at=reading["polled_at"],
+        )
+        if resolved_settings.enable_forecast_reconciliation
+        else []
+    )
+    return reading, forecasts
 
 
 def normalize_hourly_archive_response(
