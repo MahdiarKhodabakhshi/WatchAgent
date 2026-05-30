@@ -10,6 +10,7 @@ EVENT_TYPES = {
     "wmo_transition",
     "comfort_divergence",
     "cross_city_contrast",
+    "forecast_divergence",
 }
 SEVERITIES = {"info", "warning", "severe"}
 MIN_HISTORY_FOR_STATS = 12
@@ -39,10 +40,14 @@ def detect(
     reading: Any,
     history: list[Any],
     peers: dict[str, Any] | None = None,
+    forecast: Any | None = None,
+    forecast_temp_threshold: float | None = None,
 ) -> list[Event]:
     from app.detection.rules import (
+        FORECAST_TEMP_DIVERGENCE_C,
         detect_comfort_divergence,
         detect_cross_city_contrast,
+        detect_forecast_divergence,
         detect_rapid_change,
         detect_sustained_extreme,
         detect_wmo_transition,
@@ -58,5 +63,13 @@ def detect(
 
     if peers and len(history) >= MIN_HISTORY_FOR_STATS:
         events.extend(detect_cross_city_contrast(reading, history, peers))
+
+    if forecast is not None:
+        threshold = (
+            forecast_temp_threshold
+            if forecast_temp_threshold is not None
+            else FORECAST_TEMP_DIVERGENCE_C
+        )
+        events.extend(detect_forecast_divergence(reading, forecast, threshold))
 
     return events
