@@ -26,6 +26,7 @@ async def test_fetch_city_reading_uses_open_meteo_current_params() -> None:
     settings = Settings(
         open_meteo_base_url="https://weather.test/v1/forecast",
         enable_poller=False,
+        enable_forecast_reconciliation=False,
     )
 
     with respx.mock(assert_all_called=True) as mock:
@@ -33,10 +34,13 @@ async def test_fetch_city_reading_uses_open_meteo_current_params() -> None:
             return_value=httpx.Response(200, json=current_payload())
         )
         async with httpx.AsyncClient() as client:
-            reading = await fetch_city_reading(client, CITY_BY_NAME["Toronto"], settings)
+            reading, forecasts = await fetch_city_reading(
+                client, CITY_BY_NAME["Toronto"], settings,
+            )
 
     assert route.called
     request = route.calls.last.request
     assert "temperature_2m" in request.url.params["current"]
     assert request.url.params["timezone"] == "auto"
     assert reading["city"] == "Toronto"
+    assert forecasts == []
