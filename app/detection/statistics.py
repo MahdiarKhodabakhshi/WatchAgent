@@ -60,3 +60,26 @@ def newest_first(readings: Iterable[Any]) -> list[Any]:
 
 def reading_ids(readings: Iterable[Any]) -> list[int]:
     return [int(item.id) for item in readings if getattr(item, "id", None) is not None]
+
+
+def same_local_hour_values(
+    window: Iterable[Any],
+    metric: str,
+    city: str,
+    target_hour: int,
+    tolerance: int = 1,
+) -> list[float]:
+    """Metric values from readings whose LOCAL hour is within +/- tolerance of target_hour."""
+    from app.detection.timeofday import local_hour
+
+    out: list[float] = []
+    for r in window:
+        lh = local_hour(city, r.observation_ts)
+        if lh is None:
+            continue
+        dist = min((lh - target_hour) % 24, (target_hour - lh) % 24)
+        if dist <= tolerance:
+            value = getattr(r, metric, None)
+            if value is not None:
+                out.append(float(value))
+    return out
