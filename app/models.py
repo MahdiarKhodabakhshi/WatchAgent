@@ -50,6 +50,24 @@ class Reading(Base):
     weather_code: Mapped[int | None] = mapped_column(Integer)
 
 
+class Forecast(Base):
+    __tablename__ = "forecasts"
+    __table_args__ = (
+        UniqueConstraint("city", "target_ts", name="uq_forecast_city_target"),
+        Index("idx_forecasts_city_target_ts", "city", "target_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_ts: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    lead_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    temperature_2m: Mapped[float | None] = mapped_column(Float)
+    precipitation: Mapped[float | None] = mapped_column(Float)
+    wind_speed_10m: Mapped[float | None] = mapped_column(Float)
+    weather_code: Mapped[int | None] = mapped_column(Integer)
+
+
 class Event(Base):
     __tablename__ = "events"
     __table_args__ = (
