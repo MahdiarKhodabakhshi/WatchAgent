@@ -1,0 +1,12 @@
+---
+description: How tests mock the upstream weather API
+globs: "tests/**"
+---
+
+No test in this codebase makes a real network call.
+
+- Tests that exercise `httpx` or `app/open_meteo.py` must use `respx`.
+- Per-test mock payloads live in `tests/fixtures/open_meteo_responses.py`.
+- Tests must clean up mocks between tests; use pytest fixtures instead of global monkeypatching.
+
+Generated tests that import `requests`, monkeypatch `httpx.get`, or hit a real URL are incorrect.

@@ -1,0 +1,14 @@
+---
+description: Purity contract for detection functions
+globs: "app/detection/**"
+---
+
+Functions in `app/detection/` must be pure:
+
+- Signature: `(reading: Reading, history: list[Reading], peers: dict[str, Reading] | None = None) -> list[Event]`.
+- No database access. No HTTP calls. No `datetime.now()`, no `time.time()`.
+- No mutable module-level state. Constants and lookup tables are fine.
+- No `print()`. Detection should not produce side effects.
+
+This contract exists so detection logic is deterministic and testable from a fixed sequence of
+readings. Any code suggestion that violates this contract must be revised.

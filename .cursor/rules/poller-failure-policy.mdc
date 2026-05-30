@@ -1,0 +1,15 @@
+---
+description: How the poller handles failures
+globs: "app/poller.py,app/open_meteo.py"
+---
+
+The poller must never raise out of its main loop. On any upstream failure:
+
+- Log at WARNING level with structured fields: `city`, `http_status` if available, `attempt`,
+  `next_retry_seconds`, and `trace_id`.
+- Retry with exponential backoff up to `max_retries` from `app/config.py`.
+- After exhausting retries, log at ERROR, skip this city for this cycle, and continue with the
+  other cities.
+- Never partial-write a reading. If parsing fails halfway through, no database write should happen.
+
+Generated code that uses bare `try: ... except:` or re-raises out of `run_poller()` is incorrect.

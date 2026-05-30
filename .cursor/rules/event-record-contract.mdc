@@ -1,0 +1,20 @@
+---
+description: Required fields on every Event record emitted by the detection layer
+alwaysApply: true
+---
+
+Every `Event` instance produced anywhere in this codebase must include all of:
+
+- `city`: one of `Ottawa`, `Toronto`, `Vancouver`
+- `event_ts`: timezone-aware UTC datetime
+- `event_type`: one of the values listed in `app/detection/base.py`
+- `severity`: one of `info`, `warning`, `severe`
+- `signal_values`: dict containing the numeric inputs to the decision
+- `reason`: one-sentence human-readable explanation referencing the signal values
+- `supporting_reading_ids`: list of `Reading.id` integers that the event depends on
+
+If generated code constructs an Event without all of these fields, revise it.
+
+The `reason` field must reference at least one numeric value from `signal_values`. Reasons like
+"unusual weather" are rejected; reasons like "Temperature 27.9C is 3.4 sigma above Toronto's
+24-hour mean of 22.4C" are correct.

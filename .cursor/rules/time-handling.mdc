@@ -1,0 +1,13 @@
+---
+description: Timezone and datetime handling
+alwaysApply: true
+---
+
+All datetimes in this codebase are UTC and timezone-aware.
+
+- When parsing Open-Meteo responses, use `utc_offset_seconds` to convert local timestamps to UTC.
+- SQLite stores datetime values as ISO 8601 strings with an explicit `+00:00` offset through
+  `app.models.UTCDateTime`.
+- Never use `datetime.utcnow()`. Always use `datetime.now(timezone.utc)`.
+- Never introduce naive datetimes in application code.
+- API responses serialize datetimes as ISO 8601 strings with explicit timezone information.
