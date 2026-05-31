@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     open_meteo_timeout_seconds: float = Field(default=10.0, gt=0)
     max_retries: int = Field(default=3, ge=1)
     enable_forecast_reconciliation: bool = True
+    enable_fun_facts: bool = True
     forecast_lead_hours_min: int = Field(default=3, ge=1)
     forecast_lead_hours_max: int = Field(default=12, ge=1)
     forecast_temp_divergence_c: float = Field(default=6.0, gt=0)

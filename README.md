@@ -208,6 +208,13 @@ The implemented event types are:
 6. `forecast_divergence`: fires when an observed reading diverges significantly from what was
    forecast for that hour — either a temperature miss ≥ 6°C or a WMO weather code jump of ≥ 2
    severity levels.
+7. `fun_fact`: low-stakes highlights for crossing the freezing line, apparent-temperature gaps
+   that make cities feel packed for different weather, and local 14-day warm or cold records.
+
+Fun facts are a deliberate separate layer: they always use severity `info`, keep event type
+`fun_fact`, are onset-gated like the operational detectors, and can be excluded from poller storage
+with `ENABLE_FUN_FACTS=false` without changing detection. They are never mixed into the alerting
+path.
 
 ### Diurnal-aware baselines
 

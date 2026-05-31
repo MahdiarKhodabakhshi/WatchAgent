@@ -152,6 +152,8 @@ def process_reading(
             forecast=fc,
             forecast_temp_threshold=resolved_settings.forecast_temp_divergence_c,
         )
+        if not resolved_settings.enable_fun_facts:
+            events = [event for event in events if event.event_type != "fun_fact"]
         stored_events = store_events(session, events)
         session.commit()
 
