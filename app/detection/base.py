@@ -11,6 +11,7 @@ EVENT_TYPES = {
     "comfort_divergence",
     "cross_city_contrast",
     "forecast_divergence",
+    "fun_fact",
 }
 SEVERITIES = {"info", "warning", "severe"}
 MIN_HISTORY_FOR_STATS = 12
@@ -48,6 +49,7 @@ def detect(
         detect_comfort_divergence,
         detect_cross_city_contrast,
         detect_forecast_divergence,
+        detect_fun_facts,
         detect_rapid_change,
         detect_sustained_extreme,
         detect_wmo_transition,
@@ -71,5 +73,7 @@ def detect(
             else FORECAST_TEMP_DIVERGENCE_C
         )
         events.extend(detect_forecast_divergence(reading, forecast, threshold))
+
+    events.extend(detect_fun_facts(reading, history, peers))
 
     return events

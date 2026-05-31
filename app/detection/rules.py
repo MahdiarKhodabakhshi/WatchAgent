@@ -30,6 +30,9 @@ COMFORT_STD_MULTIPLIER = 2.0
 DIURNAL_WINDOW_DAYS = 14
 MIN_SAME_HOUR_SAMPLES = 7
 FORECAST_TEMP_DIVERGENCE_C = 6.0
+FUN_FACT_CROSS_CITY_MARGIN_C = 8.0
+FUN_FACT_RECORD_WINDOW_DAYS = 14
+FREEZING_C = 0.0
 CROSS_CITY_MIN_GAP = {
     "temperature_2m": 5.0,
     "apparent_temperature": 5.0,
@@ -333,6 +336,23 @@ def detect_cross_city_contrast(
     return events
 
 
+def detect_fun_facts(
+    reading: Any,
+    history: list[Any],
+    peers: dict[str, Any] | None = None,
+) -> list[Event]:
+    previous_reading = _previous_reading(reading, history)
+    events: list[Event] = []
+    if previous_reading is None:
+        return events
+
+    peer_readings = peers or {}
+    events.extend(_detect_freezing_line(reading, previous_reading, peer_readings))
+    events.extend(_detect_pack_differently(reading, previous_reading, peer_readings))
+    events.extend(_detect_local_record(reading, history, previous_reading))
+    return events
+
+
 def detect_forecast_divergence(
     reading: Any,
     forecast: Any,
@@ -399,6 +419,201 @@ def detect_forecast_divergence(
     return events
 
 
+def _detect_freezing_line(
+    reading: Any,
+    previous_reading: Any,
+    peers: dict[str, Any],
+) -> list[Event]:
+    previous_temp = _float_attr(previous_reading, "temperature_2m")
+    current_temp = _float_attr(reading, "temperature_2m")
+    if previous_temp is None or current_temp is None:
+        return []
+    if not _crossed_freezing(previous_temp, current_temp):
+        return []
+
+    events: list[Event] = []
+    for peer_city, peer in peers.items():
+        peer_temp = _float_attr(peer, "temperature_2m")
+        if peer_temp is None:
+            continue
+        if not _opposite_freezing_sides(current_temp, peer_temp):
+            continue
+
+        signal_values = {
+            "kind": "freezing_line",
+            "previous_temperature_2m": round(previous_temp, 3),
+            "current_temperature_2m": round(current_temp, 3),
+            "peer_city": peer_city,
+            "peer_temperature_2m": round(peer_temp, 3),
+            "freezing_c": FREEZING_C,
+        }
+        events.append(
+            Event(
+                city=reading.city,
+                event_ts=reading.observation_ts,
+                event_type="fun_fact",
+                severity="info",
+                metric="temperature_2m",
+                signal_values=signal_values,
+                reason=(
+                    f"Temperature crossed {FREEZING_C:.1f}C from "
+                    f"{previous_temp:.1f}C to {current_temp:.1f}C while "
+                    f"{peer_city} was {peer_temp:.1f}C."
+                ),
+                supporting_reading_ids=_supporting_ids(
+                    reading, [previous_reading, peer],
+                ),
+            )
+        )
+    return events
+
+
+def _detect_pack_differently(
+    reading: Any,
+    previous_reading: Any,
+    peers: dict[str, Any],
+) -> list[Event]:
+    previous_apparent = _float_attr(previous_reading, "apparent_temperature")
+    current_apparent = _float_attr(reading, "apparent_temperature")
+    if previous_apparent is None or current_apparent is None:
+        return []
+
+    events: list[Event] = []
+    for peer_city, peer in peers.items():
+        peer_apparent = _float_attr(peer, "apparent_temperature")
+        if peer_apparent is None:
+            continue
+
+        previous_gap = previous_apparent - peer_apparent
+        current_gap = current_apparent - peer_apparent
+        previous_gap_magnitude = abs(previous_gap)
+        current_gap_magnitude = abs(current_gap)
+        if not (
+            current_gap_magnitude >= FUN_FACT_CROSS_CITY_MARGIN_C
+            > previous_gap_magnitude
+        ):
+            continue
+
+        signal_values = {
+            "kind": "pack_differently",
+            "peer_city": peer_city,
+            "previous_gap_c": round(previous_gap, 3),
+            "gap_c": round(current_gap, 3),
+            "previous_gap_magnitude_c": round(previous_gap_magnitude, 3),
+            "gap_magnitude_c": round(current_gap_magnitude, 3),
+            "margin_c": FUN_FACT_CROSS_CITY_MARGIN_C,
+            "current_apparent_temperature": round(current_apparent, 3),
+            "peer_apparent_temperature": round(peer_apparent, 3),
+        }
+        events.append(
+            Event(
+                city=reading.city,
+                event_ts=reading.observation_ts,
+                event_type="fun_fact",
+                severity="info",
+                metric="apparent_temperature",
+                signal_values=signal_values,
+                reason=(
+                    f"Apparent temperature gap to {peer_city} reached "
+                    f"{current_gap_magnitude:.1f}C from "
+                    f"{previous_gap_magnitude:.1f}C, crossing "
+                    f"{FUN_FACT_CROSS_CITY_MARGIN_C:.1f}C."
+                ),
+                supporting_reading_ids=_supporting_ids(
+                    reading, [previous_reading, peer],
+                ),
+            )
+        )
+    return events
+
+
+def _detect_local_record(
+    reading: Any,
+    history: list[Any],
+    previous_reading: Any,
+) -> list[Event]:
+    current_temp = _float_attr(reading, "temperature_2m")
+    previous_temp = _float_attr(previous_reading, "temperature_2m")
+    if current_temp is None or previous_temp is None:
+        return []
+
+    window_hours = FUN_FACT_RECORD_WINDOW_DAYS * 24
+    window = readings_within_hours(reading, history, window_hours)
+    values = metric_values(window, "temperature_2m")
+    if len(values) < MIN_HISTORY_FOR_STATS:
+        return []
+
+    previous_window = readings_within_hours(previous_reading, history, window_hours)
+    previous_values = metric_values(previous_window, "temperature_2m")
+    if not previous_values:
+        return []
+
+    record_high = max(values)
+    record_low = min(values)
+    previous_high = max(previous_values)
+    previous_low = min(previous_values)
+
+    warm_now = current_temp > record_high
+    cold_now = current_temp < record_low
+    warm_previous = previous_temp > previous_high
+    cold_previous = previous_temp < previous_low
+
+    if warm_now and not warm_previous:
+        return [
+            _local_record_event(
+                reading,
+                window,
+                kind="warm_record",
+                current_temp=current_temp,
+                previous_record_temp=record_high,
+            )
+        ]
+    if cold_now and not cold_previous:
+        return [
+            _local_record_event(
+                reading,
+                window,
+                kind="cold_record",
+                current_temp=current_temp,
+                previous_record_temp=record_low,
+            )
+        ]
+    return []
+
+
+def _local_record_event(
+    reading: Any,
+    window: list[Any],
+    *,
+    kind: str,
+    current_temp: float,
+    previous_record_temp: float,
+) -> Event:
+    direction = "warm" if kind == "warm_record" else "cold"
+    comparator = "above" if kind == "warm_record" else "below"
+    signal_values = {
+        "kind": kind,
+        "current_temperature_2m": round(current_temp, 3),
+        "previous_record_temperature_2m": round(previous_record_temp, 3),
+        "window_days": FUN_FACT_RECORD_WINDOW_DAYS,
+        "window_n": len(metric_values(window, "temperature_2m")),
+    }
+    return Event(
+        city=reading.city,
+        event_ts=reading.observation_ts,
+        event_type="fun_fact",
+        severity="info",
+        metric="temperature_2m",
+        signal_values=signal_values,
+        reason=(
+            f"Temperature {current_temp:.1f}C set a "
+            f"{FUN_FACT_RECORD_WINDOW_DAYS}-day {direction} record "
+            f"{comparator} the previous mark of {previous_record_temp:.1f}C."
+        ),
+        supporting_reading_ids=_supporting_ids(reading, window),
+    )
+
+
 def _same_hour_comfort_gaps(
     window: list[Any], city: str, target_hour: int, tolerance: int = 1,
 ) -> list[float]:
@@ -422,6 +637,39 @@ def _comfort_gap(reading: Any) -> float | None:
     if actual is None or apparent is None:
         return None
     return abs(float(apparent) - float(actual))
+
+
+def _previous_reading(reading: Any, history: list[Any]) -> Any | None:
+    candidates = [
+        item for item in history if item.observation_ts < reading.observation_ts
+    ]
+    ordered = newest_first(candidates)
+    return ordered[0] if ordered else None
+
+
+def _float_attr(reading: Any, metric: str) -> float | None:
+    value = getattr(reading, metric, None)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _crossed_freezing(previous_temp: float, current_temp: float) -> bool:
+    return (
+        previous_temp >= FREEZING_C
+        and current_temp < FREEZING_C
+        or previous_temp < FREEZING_C
+        and current_temp >= FREEZING_C
+    )
+
+
+def _opposite_freezing_sides(current_temp: float, peer_temp: float) -> bool:
+    return (
+        current_temp < FREEZING_C
+        and peer_temp >= FREEZING_C
+        or current_temp >= FREEZING_C
+        and peer_temp < FREEZING_C
+    )
 
 
 def _supporting_ids(reading: Any, history: list[Any]) -> list[int]:

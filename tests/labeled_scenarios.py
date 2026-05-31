@@ -125,27 +125,29 @@ SCENARIOS: list[Scenario] = [
     # --- rapid_change ---
     Scenario(
         name="rapid_change_fires_severe",
-        description="Temperature 6 sigma above mean → severe rapid_change.",
+        description=(
+            "Temperature 6 sigma above mean → severe rapid_change plus warm-record fun_fact."
+        ),
         history=_stable_history(20, temp=20.0, temp_noise=1.0),
         reading=_r(id=100, temperature_2m=26.0),
-        expected_types={"rapid_change"},
+        expected_types={"rapid_change", "fun_fact"},
     ),
     Scenario(
         name="rapid_change_below_threshold",
-        description="Temperature within 2.5 sigma → no event.",
+        description="Temperature within 2.5 sigma; only a warm-record fun_fact fires.",
         history=_stable_history(20, temp=20.0, temp_noise=1.0),
         reading=_r(id=100, temperature_2m=21.2),
-        expected_types=set(),
+        expected_types={"fun_fact"},
     ),
     Scenario(
         name="rapid_change_zero_std_no_fire",
-        description="All identical values → std=0 → no rapid_change.",
+        description="All identical values → std=0, but a warm-record fun_fact fires.",
         history=[
             _r(id=i + 1, hours_offset=-(i + 1), temperature_2m=20.0)
             for i in range(20)
         ],
         reading=_r(id=100, temperature_2m=20.1),
-        expected_types=set(),
+        expected_types={"fun_fact"},
     ),
     # --- sustained_extreme ---
     Scenario(
@@ -225,15 +227,17 @@ SCENARIOS: list[Scenario] = [
         ],
         reading=_r(id=100, city="Ottawa", temperature_2m=22.0),
         peers={"Toronto": _r(id=50, city="Toronto", temperature_2m=5.0)},
-        expected_types={"cross_city_contrast"},
+        expected_types={"cross_city_contrast", "fun_fact"},
     ),
     Scenario(
         name="cross_city_no_peers",
-        description="No peers → no cross_city_contrast event possible.",
+        description=(
+            "No peers → no cross_city_contrast event possible; warm-record fun_fact still can fire."
+        ),
         history=_stable_history(20),
         reading=_r(id=100, temperature_2m=40.0),
         peers={},
-        expected_types={"rapid_change"},
+        expected_types={"rapid_change", "fun_fact"},
     ),
     # --- cold start ---
     Scenario(
@@ -268,7 +272,7 @@ SCENARIOS: list[Scenario] = [
         description="Extreme afternoon spike above diurnal same-hour distribution → fires.",
         history=_diurnal_history("Toronto", days=14),
         reading=_r(id=10000, city="Toronto", temperature_2m=35.0),
-        expected_types={"rapid_change"},
+        expected_types={"rapid_change", "fun_fact"},
     ),
     # --- forecast_divergence (Feature 3) ---
     Scenario(
@@ -285,7 +289,7 @@ SCENARIOS: list[Scenario] = [
         history=_stable_history(20),
         reading=_r(id=100, temperature_2m=28.0),
         forecast=FakeForecast(weather_code=0, temperature_2m=20.0, lead_hours=6),
-        expected_types={"rapid_change", "forecast_divergence"},
+        expected_types={"rapid_change", "forecast_divergence", "fun_fact"},
     ),
     Scenario(
         name="forecast_small_error_no_event",
