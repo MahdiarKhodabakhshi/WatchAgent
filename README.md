@@ -74,6 +74,18 @@ service; it is only used by the offline data-analysis Cursor skill.
 
 If port 8000 is already in use, set `HOST_PORT` in `.env` before starting Compose.
 
+### Recreate a local dev database after schema changes
+
+This project does not use Alembic yet. Schema changes are additive in the SQLAlchemy models and a
+clean clone creates the right SQLite tables automatically. If you already have a local development
+database from an older schema, recreate it before running the app:
+
+```bash
+docker compose down
+rm -f data/watchagent.db data/watchagent.db-*
+docker compose up --build
+```
+
 ### Dashboard
 
 The Docker image also builds a read-only React dashboard and serves it from the same FastAPI origin
@@ -142,6 +154,11 @@ curl "http://localhost:8000/readings?city=Toronto&limit=10"
   ]
 }
 ```
+
+The readings schema is additive. Enriched Open-Meteo fields such as `surface_pressure`,
+`pressure_msl`, `relative_humidity_2m`, `dew_point_2m`, `wind_gusts_10m`, `cloud_cover`,
+`snowfall`, and `snow_depth` are also returned when available, and are `null` when Open-Meteo omits
+them.
 
 ### `GET /events`
 
@@ -234,6 +251,11 @@ preserving the most informative prediction. When a reading arrives, the poller l
 forecast exists for that exact hour and, if so, passes it to the pure `detect_forecast_divergence`
 detector. The feature ships behind `ENABLE_FORECAST_RECONCILIATION` (default true) so it can be
 toggled off without code changes.
+
+The live and archive Open-Meteo pulls request the same enriched weather variables needed for later
+climatology: pressure, humidity, dew point, gusts, cloud cover, snowfall, and snow depth. The
+Open-Meteo Historical Weather API accepts those variables on `/v1/archive`; if any model response
+omits a variable for a city/hour, WatchAgent stores `null` rather than failing the poll or backfill.
 
 Implementation note: the plan describes a full historical pairwise distribution for
 `cross_city_contrast`. The detector contract in the same plan passes only the triggering city's

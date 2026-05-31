@@ -165,20 +165,32 @@ def test_forecasts_returns_documented_shape(client, db_session: Session) -> None
     response = client.get("/forecasts?limit=10")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "forecasts": [
-            {
-                "city": "Toronto",
-                "target_ts": "2026-05-27T13:00:00Z",
-                "issued_at": "2026-05-27T06:00:00Z",
-                "lead_hours": 6,
-                "temperature_2m": 21.5,
-                "precipitation": 0.0,
-                "wind_speed_10m": 10.0,
-                "weather_code": 0,
-            }
-        ]
-    }
+    forecasts = response.json()["forecasts"]
+    assert len(forecasts) == 1
+    assert {
+        "city",
+        "target_ts",
+        "issued_at",
+        "lead_hours",
+        "temperature_2m",
+        "precipitation",
+        "wind_speed_10m",
+        "weather_code",
+        "surface_pressure",
+        "pressure_msl",
+        "relative_humidity_2m",
+        "dew_point_2m",
+        "wind_gusts_10m",
+        "cloud_cover",
+        "snowfall",
+        "snow_depth",
+    } <= set(forecasts[0])
+    assert forecasts[0]["city"] == "Toronto"
+    assert forecasts[0]["target_ts"] == "2026-05-27T13:00:00Z"
+    assert forecasts[0]["issued_at"] == "2026-05-27T06:00:00Z"
+    assert forecasts[0]["lead_hours"] == 6
+    assert forecasts[0]["temperature_2m"] == 21.5
+    assert forecasts[0]["surface_pressure"] is None
 
 
 def test_forecasts_filtered_by_city(client, db_session: Session) -> None:

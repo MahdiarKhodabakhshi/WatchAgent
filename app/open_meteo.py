@@ -30,13 +30,32 @@ CURRENT_VARIABLES = (
     "precipitation",
     "wind_speed_10m",
     "weather_code",
+    "surface_pressure",
+    "pressure_msl",
+    "relative_humidity_2m",
+    "dew_point_2m",
+    "wind_gusts_10m",
+    "cloud_cover",
+    "snowfall",
+    "snow_depth",
 )
 HOURLY_VARIABLES = CURRENT_VARIABLES
+ENRICHED_FLOAT_VARIABLES = (
+    "surface_pressure",
+    "pressure_msl",
+    "relative_humidity_2m",
+    "dew_point_2m",
+    "wind_gusts_10m",
+    "cloud_cover",
+    "snowfall",
+    "snow_depth",
+)
 FORECAST_HOURLY_VARIABLES = (
     "temperature_2m",
     "precipitation",
     "weather_code",
     "wind_speed_10m",
+    *ENRICHED_FLOAT_VARIABLES,
 )
 
 
@@ -74,6 +93,14 @@ def normalize_current_response(
         "precipitation": _optional_float(current.get("precipitation")),
         "wind_speed_10m": _optional_float(current.get("wind_speed_10m")),
         "weather_code": _optional_int(current.get("weather_code")),
+        "surface_pressure": _optional_float(current.get("surface_pressure")),
+        "pressure_msl": _optional_float(current.get("pressure_msl")),
+        "relative_humidity_2m": _optional_float(current.get("relative_humidity_2m")),
+        "dew_point_2m": _optional_float(current.get("dew_point_2m")),
+        "wind_gusts_10m": _optional_float(current.get("wind_gusts_10m")),
+        "cloud_cover": _optional_float(current.get("cloud_cover")),
+        "snowfall": _optional_float(current.get("snowfall")),
+        "snow_depth": _optional_float(current.get("snow_depth")),
     }
 
 
@@ -104,6 +131,10 @@ def normalize_forecast_hourly_response(
     precip = _opt_list("precipitation")
     wind = _opt_list("wind_speed_10m")
     codes = _opt_list("weather_code")
+    extra_series = {
+        name: _opt_list(name)
+        for name in ENRICHED_FLOAT_VARIABLES
+    }
 
     rows: list[dict[str, Any]] = []
     for idx, ts_str in enumerate(time_values):
@@ -122,6 +153,10 @@ def normalize_forecast_hourly_response(
                 "precipitation": _optional_float(precip[idx]),
                 "wind_speed_10m": _optional_float(wind[idx]),
                 "weather_code": _optional_int(codes[idx]),
+                **{
+                    name: _optional_float(series[idx])
+                    for name, series in extra_series.items()
+                },
             }
         )
     return rows
@@ -192,6 +227,10 @@ def normalize_hourly_archive_response(
     precipitation = _series("precipitation")
     wind = _series("wind_speed_10m")
     codes = _series("weather_code")
+    extra_series = {
+        name: _series(name)
+        for name in ENRICHED_FLOAT_VARIABLES
+    }
 
     rows: list[dict[str, Any]] = []
     for idx, ts in enumerate(time_values):
@@ -205,6 +244,10 @@ def normalize_hourly_archive_response(
                 "precipitation": _optional_float(precipitation[idx]),
                 "wind_speed_10m": _optional_float(wind[idx]),
                 "weather_code": _optional_int(codes[idx]),
+                **{
+                    name: _optional_float(series[idx])
+                    for name, series in extra_series.items()
+                },
             }
         )
     return rows

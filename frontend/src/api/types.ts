@@ -28,6 +28,14 @@ export interface Reading {
   precipitation: number | null;
   wind_speed_10m: number | null;
   weather_code: number | null;
+  surface_pressure: number | null;
+  pressure_msl: number | null;
+  relative_humidity_2m: number | null;
+  dew_point_2m: number | null;
+  wind_gusts_10m: number | null;
+  cloud_cover: number | null;
+  snowfall: number | null;
+  snow_depth: number | null;
 }
 
 export interface WatchEvent {
@@ -41,6 +49,18 @@ export interface WatchEvent {
   signal_values: Record<string, unknown>;
   reason: string;
   supporting_reading_ids: number[];
+  status: string | null;
+  onset_ts: string | null;
+  peak_ts: string | null;
+  resolved_ts: string | null;
+  priority_score: number | null;
+  confidence: number | null;
+  rarity_percentile: number | null;
+  detector_name: string | null;
+  detector_version: string | null;
+  dedupe_key: string | null;
+  related_event_ids: number[] | null;
+  evidence: Record<string, unknown> | null;
 }
 
 export interface Forecast {
@@ -52,6 +72,14 @@ export interface Forecast {
   precipitation: number | null;
   wind_speed_10m: number | null;
   weather_code: number | null;
+  surface_pressure: number | null;
+  pressure_msl: number | null;
+  relative_humidity_2m: number | null;
+  dew_point_2m: number | null;
+  wind_gusts_10m: number | null;
+  cloud_cover: number | null;
+  snowfall: number | null;
+  snow_depth: number | null;
 }
 
 export interface HealthResponse {

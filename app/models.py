@@ -48,6 +48,14 @@ class Reading(Base):
     precipitation: Mapped[float | None] = mapped_column(Float)
     wind_speed_10m: Mapped[float | None] = mapped_column(Float)
     weather_code: Mapped[int | None] = mapped_column(Integer)
+    surface_pressure: Mapped[float | None] = mapped_column(Float)
+    pressure_msl: Mapped[float | None] = mapped_column(Float)
+    relative_humidity_2m: Mapped[float | None] = mapped_column(Float)
+    dew_point_2m: Mapped[float | None] = mapped_column(Float)
+    wind_gusts_10m: Mapped[float | None] = mapped_column(Float)
+    cloud_cover: Mapped[float | None] = mapped_column(Float)
+    snowfall: Mapped[float | None] = mapped_column(Float)
+    snow_depth: Mapped[float | None] = mapped_column(Float)
 
 
 class Forecast(Base):
@@ -66,6 +74,14 @@ class Forecast(Base):
     precipitation: Mapped[float | None] = mapped_column(Float)
     wind_speed_10m: Mapped[float | None] = mapped_column(Float)
     weather_code: Mapped[int | None] = mapped_column(Integer)
+    surface_pressure: Mapped[float | None] = mapped_column(Float)
+    pressure_msl: Mapped[float | None] = mapped_column(Float)
+    relative_humidity_2m: Mapped[float | None] = mapped_column(Float)
+    dew_point_2m: Mapped[float | None] = mapped_column(Float)
+    wind_gusts_10m: Mapped[float | None] = mapped_column(Float)
+    cloud_cover: Mapped[float | None] = mapped_column(Float)
+    snowfall: Mapped[float | None] = mapped_column(Float)
+    snow_depth: Mapped[float | None] = mapped_column(Float)
 
 
 class Event(Base):
@@ -85,3 +101,17 @@ class Event(Base):
     signal_values: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     supporting_reading_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    onset_ts: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    peak_ts: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    resolved_ts: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    priority_score: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    rarity_percentile: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    detector_name: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    detector_version: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    dedupe_key: Mapped[str | None] = mapped_column(String(160), nullable=True, default=None)
+    related_event_ids: Mapped[list[int] | None] = mapped_column(
+        JSON, nullable=True, default=list,
+    )
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, default=dict)
