@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 
-import { useEvents, useHealth, useReadings } from "./api/hooks";
-import type { Reading, WatchEvent } from "./api/types";
+import { useCrossCityReadings, useEvents, useForecasts, useHealth, useReadings } from "./api/hooks";
+import type { Forecast, Reading, WatchEvent } from "./api/types";
 import { ChartGrid } from "./components/ChartGrid";
 import { CityFilter } from "./components/CityFilter";
 import { ConditionsStrip } from "./components/ConditionsStrip";
+import { CrossCityCompare } from "./components/CrossCityCompare";
 import { EventDetail } from "./components/EventDetail";
+import { EventDistribution } from "./components/EventDistribution";
 import { EventFeed } from "./components/EventFeed";
 import { HealthBar } from "./components/HealthBar";
 import { TimeWindow } from "./components/TimeWindow";
@@ -14,6 +16,7 @@ import { useDashboardParams } from "./state/useDashboardParams";
 
 const EMPTY_READINGS: Reading[] = [];
 const EMPTY_EVENTS: WatchEvent[] = [];
+const EMPTY_FORECASTS: Forecast[] = [];
 
 function newestPolledAt(readings: { polled_at: string }[]): string | undefined {
   return readings.reduce<string | undefined>((latest, reading) => {
@@ -35,6 +38,13 @@ export default function App() {
     city: params.city,
     windowRange: params.windowRange,
   });
+  const crossCityReadingsQuery = useCrossCityReadings({
+    windowRange: params.windowRange,
+  });
+  const forecastsQuery = useForecasts({
+    city: params.city,
+    windowRange: params.windowRange,
+  });
   const eventsQuery = useEvents({
     city: params.city,
     windowRange: params.windowRange,
@@ -43,6 +53,8 @@ export default function App() {
   });
 
   const readings = readingsQuery.data?.readings ?? EMPTY_READINGS;
+  const crossCityReadings = crossCityReadingsQuery.data?.readings ?? EMPTY_READINGS;
+  const forecasts = forecastsQuery.data?.forecasts ?? EMPTY_FORECASTS;
   const events = eventsQuery.data?.events ?? EMPTY_EVENTS;
   const latestPolledAt = useMemo(() => newestPolledAt(readings), [readings]);
   const selectedEvent = useMemo(
@@ -97,6 +109,7 @@ export default function App() {
 
       <ChartGrid
         readings={readings}
+        forecasts={forecasts}
         events={events}
         isLoading={readingsQuery.isPending}
         isError={readingsQuery.isError}
@@ -104,6 +117,16 @@ export default function App() {
         onSelectEvent={(event) => setSelectedEventId(event.id)}
         onRetry={() => void readingsQuery.refetch()}
       />
+
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(24rem,0.45fr)]">
+        <CrossCityCompare
+          readings={crossCityReadings}
+          isLoading={crossCityReadingsQuery.isPending}
+          isError={crossCityReadingsQuery.isError}
+          onRetry={() => void crossCityReadingsQuery.refetch()}
+        />
+        <EventDistribution events={events} eventTypes={params.allEventTypes} />
+      </div>
 
       <EventFeed
         events={events}

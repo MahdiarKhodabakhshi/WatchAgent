@@ -1,7 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchEvents, fetchHealth, fetchReadings } from "./client";
-import type { DashboardCity, EventType, Severity, TimeWindow, WatchEvent } from "./types";
+import { fetchEvents, fetchForecasts, fetchHealth, fetchReadings } from "./client";
+import {
+  CITIES,
+  type City,
+  type DashboardCity,
+  type EventType,
+  type Severity,
+  type TimeWindow,
+  type WatchEvent,
+} from "./types";
 
 const REFRESH_INTERVAL_MS = 30_000;
 const STALE_TIME_MS = 25_000;
@@ -55,6 +63,26 @@ export function useReadings(params: { city: DashboardCity; windowRange: TimeWind
   });
 }
 
+export function useCrossCityReadings(params: { windowRange: TimeWindow }) {
+  return useQuery({
+    queryKey: ["readings", "cross-city", params.windowRange],
+    queryFn: async () => {
+      const range = rangeForWindow(params.windowRange);
+      const responses = await Promise.all(
+        CITIES.map((city: City) => fetchReadings({ city, ...range })),
+      );
+      return {
+        readings: responses.flatMap((response) => response.readings),
+      };
+    },
+    refetchInterval: REFRESH_INTERVAL_MS,
+    staleTime: STALE_TIME_MS,
+    select: (data) => ({
+      readings: data.readings.filter((reading) => inWindow(reading.observation_ts, params.windowRange)),
+    }),
+  });
+}
+
 export function useEvents(params: {
   city: DashboardCity;
   windowRange: TimeWindow;
@@ -84,5 +112,17 @@ export function useEvents(params: {
       });
       return { events };
     },
+  });
+}
+
+export function useForecasts(params: { city: DashboardCity; windowRange: TimeWindow }) {
+  return useQuery({
+    queryKey: ["forecasts", params.city, params.windowRange],
+    queryFn: () => fetchForecasts({ city: params.city, ...rangeForWindow(params.windowRange) }),
+    refetchInterval: REFRESH_INTERVAL_MS,
+    staleTime: STALE_TIME_MS,
+    select: (data) => ({
+      forecasts: data.forecasts.filter((forecast) => inWindow(forecast.target_ts, params.windowRange)),
+    }),
   });
 }

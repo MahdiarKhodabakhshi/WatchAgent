@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import type { Reading, WatchEvent } from "../api/types";
+import type { Forecast, Reading, WatchEvent } from "../api/types";
 import { EmptyState } from "./states/EmptyState";
 import { ErrorState } from "./states/ErrorState";
 import { LoadingState } from "./states/LoadingState";
@@ -14,6 +14,7 @@ type ChartMetric = "temperature" | "wind" | "precipitation" | "weather";
 
 interface ChartGridProps {
   readings: Reading[];
+  forecasts: Forecast[];
   events: WatchEvent[];
   isLoading: boolean;
   isError: boolean;
@@ -28,6 +29,7 @@ const metricColors = {
   wind: "var(--line-wind)",
   precipitation: "var(--line-precip)",
   weather: "var(--line-forecast)",
+  forecast: "var(--line-forecast)",
 };
 
 function average(values: Array<number | null>): number | null {
@@ -38,7 +40,7 @@ function average(values: Array<number | null>): number | null {
   return numeric.reduce((sum, value) => sum + value, 0) / numeric.length;
 }
 
-function buildChartData(readings: Reading[]): ChartDatum[] {
+function buildChartData(readings: Reading[], forecasts: Forecast[]): ChartDatum[] {
   const byTimestamp = new Map<number, Reading[]>();
   readings.forEach((reading) => {
     const ts = new Date(reading.observation_ts).getTime();
@@ -48,14 +50,35 @@ function buildChartData(readings: Reading[]): ChartDatum[] {
     byTimestamp.set(ts, [...(byTimestamp.get(ts) ?? []), reading]);
   });
 
-  return Array.from(byTimestamp.entries())
-    .map(([ts, rows]) => ({
+  const forecastsByTimestamp = new Map<number, Forecast[]>();
+  forecasts.forEach((forecast) => {
+    const ts = new Date(forecast.target_ts).getTime();
+    if (Number.isNaN(ts)) {
+      return;
+    }
+    forecastsByTimestamp.set(ts, [...(forecastsByTimestamp.get(ts) ?? []), forecast]);
+  });
+
+  const timestamps = new Set([...byTimestamp.keys(), ...forecastsByTimestamp.keys()]);
+
+  return Array.from(timestamps)
+    .map((ts) => ({
       ts,
-      temperature_2m: average(rows.map((reading) => reading.temperature_2m)),
-      apparent_temperature: average(rows.map((reading) => reading.apparent_temperature)),
-      wind_speed_10m: average(rows.map((reading) => reading.wind_speed_10m)),
-      precipitation: average(rows.map((reading) => reading.precipitation)),
-      weather_code: average(rows.map((reading) => reading.weather_code)),
+      rows: byTimestamp.get(ts) ?? [],
+      forecastRows: forecastsByTimestamp.get(ts) ?? [],
+    }))
+    .map(({ ts, rows, forecastRows }) => ({
+      ts,
+      temperature_2m: rows.length > 0 ? average(rows.map((reading) => reading.temperature_2m)) : null,
+      apparent_temperature:
+        rows.length > 0 ? average(rows.map((reading) => reading.apparent_temperature)) : null,
+      forecast_temperature_2m:
+        forecastRows.length > 0
+          ? average(forecastRows.map((forecast) => forecast.temperature_2m))
+          : null,
+      wind_speed_10m: rows.length > 0 ? average(rows.map((reading) => reading.wind_speed_10m)) : null,
+      precipitation: rows.length > 0 ? average(rows.map((reading) => reading.precipitation)) : null,
+      weather_code: rows.length > 0 ? average(rows.map((reading) => reading.weather_code)) : null,
     }))
     .sort((left, right) => left.ts - right.ts);
 }
@@ -162,6 +185,7 @@ function xDomainFor(data: ChartDatum[]): [number, number] {
 
 export function ChartGrid({
   readings,
+  forecasts,
   events,
   isLoading,
   isError,
@@ -169,9 +193,10 @@ export function ChartGrid({
   onSelectEvent,
   onRetry,
 }: ChartGridProps) {
-  const chartData = useMemo(() => buildChartData(readings), [readings]);
+  const chartData = useMemo(() => buildChartData(readings, forecasts), [forecasts, readings]);
   const markers = useMemo(() => buildMarkers(events, readings), [events, readings]);
   const xDomain = useMemo(() => xDomainFor(chartData), [chartData]);
+  const hasForecastOverlay = chartData.some((datum) => datum.forecast_temperature_2m !== null);
 
   if (isError) {
     return (
@@ -224,6 +249,16 @@ export function ChartGrid({
               color: metricColors.apparent,
               dashed: true,
             },
+            ...(hasForecastOverlay
+              ? [
+                  {
+                    dataKey: "forecast_temperature_2m" as const,
+                    name: "forecast_temperature_2m",
+                    color: metricColors.forecast,
+                    dashed: true,
+                  },
+                ]
+              : []),
           ]}
           markers={markers.temperature}
           selectedEventId={selectedEventId}

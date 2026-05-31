@@ -18,6 +18,7 @@ export interface ChartDatum {
   ts: number;
   temperature_2m: number | null;
   apparent_temperature: number | null;
+  forecast_temperature_2m: number | null;
   wind_speed_10m: number | null;
   precipitation: number | null;
   weather_code: number | null;

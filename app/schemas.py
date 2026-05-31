@@ -33,6 +33,19 @@ class EventOut(BaseModel):
     supporting_reading_ids: list[int]
 
 
+class ForecastOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    city: str
+    target_ts: datetime
+    issued_at: datetime
+    lead_hours: int
+    temperature_2m: float | None
+    precipitation: float | None
+    wind_speed_10m: float | None
+    weather_code: int | None
+
+
 class HealthResponse(BaseModel):
     status: str
     readings_stored: int
@@ -45,3 +58,7 @@ class ReadingsResponse(BaseModel):
 
 class EventsResponse(BaseModel):
     events: list[EventOut]
+
+
+class ForecastsResponse(BaseModel):
+    forecasts: list[ForecastOut]

@@ -15,7 +15,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 from app.db import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Event, Reading  # noqa: E402
+from app.models import Event, Forecast, Reading  # noqa: E402
 
 BASE_TS = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
 
@@ -119,3 +119,30 @@ def seed_event(session: Session, reading: Reading, event_type: str = "rapid_chan
     session.add(event)
     session.commit()
     return event
+
+
+def seed_forecast(
+    session: Session,
+    *,
+    city: str = "Toronto",
+    hours_offset: int = 0,
+    issued_offset: int = -6,
+    lead_hours: int = 6,
+    temperature_2m: float = 20.0,
+    precipitation: float = 0.0,
+    wind_speed_10m: float = 10.0,
+    weather_code: int = 0,
+) -> Forecast:
+    forecast = Forecast(
+        city=city,
+        target_ts=BASE_TS + timedelta(hours=hours_offset),
+        issued_at=BASE_TS + timedelta(hours=issued_offset),
+        lead_hours=lead_hours,
+        temperature_2m=temperature_2m,
+        precipitation=precipitation,
+        wind_speed_10m=wind_speed_10m,
+        weather_code=weather_code,
+    )
+    session.add(forecast)
+    session.commit()
+    return forecast

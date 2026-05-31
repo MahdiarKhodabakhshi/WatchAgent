@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
-from app.models import Event, Reading
+from app.models import Event, Forecast, Reading
 from app.poller import run_poller
-from app.schemas import EventsResponse, HealthResponse, ReadingsResponse
+from app.schemas import EventsResponse, ForecastsResponse, HealthResponse, ReadingsResponse
 from app.storage import count_events, count_readings
 
 CityName = Literal["Ottawa", "Toronto", "Vancouver"]
@@ -104,6 +104,27 @@ def get_events(
         query = query.where(Event.event_ts <= end_utc)
     query = query.order_by(Event.event_ts.desc()).limit(limit)
     return {"events": list(db.scalars(query).all())}
+
+
+@app.get("/forecasts", response_model=ForecastsResponse)
+def get_forecasts(
+    city: Annotated[CityName | None, Query()] = None,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, list[Forecast]]:
+    start_utc = _utc_query_datetime(start, "start")
+    end_utc = _utc_query_datetime(end, "end")
+    query = select(Forecast)
+    if city is not None:
+        query = query.where(Forecast.city == city)
+    if start_utc is not None:
+        query = query.where(Forecast.target_ts >= start_utc)
+    if end_utc is not None:
+        query = query.where(Forecast.target_ts <= end_utc)
+    query = query.order_by(Forecast.target_ts.desc()).limit(limit)
+    return {"forecasts": list(db.scalars(query).all())}
 
 
 _FRONTEND_DIST = Path(__file__).parent / "static"

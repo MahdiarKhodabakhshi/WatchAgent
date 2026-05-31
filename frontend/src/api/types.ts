@@ -43,6 +43,17 @@ export interface WatchEvent {
   supporting_reading_ids: number[];
 }
 
+export interface Forecast {
+  city: City;
+  target_ts: string;
+  issued_at: string;
+  lead_hours: number;
+  temperature_2m: number | null;
+  precipitation: number | null;
+  wind_speed_10m: number | null;
+  weather_code: number | null;
+}
+
 export interface HealthResponse {
   status: string;
   readings_stored: number;
@@ -55,6 +66,10 @@ export interface ReadingsResponse {
 
 export interface EventsResponse {
   events: WatchEvent[];
+}
+
+export interface ForecastsResponse {
+  forecasts: Forecast[];
 }
 
 export function isCity(value: string): value is City {

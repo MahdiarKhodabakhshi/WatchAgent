@@ -1,6 +1,7 @@
 import type {
   DashboardCity,
   EventsResponse,
+  ForecastsResponse,
   HealthResponse,
   ReadingsResponse,
 } from "./types";
@@ -81,5 +82,22 @@ export function fetchEvents(params: {
       limit: params.limit ?? DEFAULT_LIMIT,
     }),
     "Events",
+  );
+}
+
+export function fetchForecasts(params: {
+  city: DashboardCity;
+  start?: string;
+  end?: string;
+  limit?: number;
+}): Promise<ForecastsResponse> {
+  return readJson<ForecastsResponse>(
+    pathWithParams("/forecasts", {
+      city: cityParam(params.city),
+      start: params.start,
+      end: params.end,
+      limit: params.limit ?? DEFAULT_LIMIT,
+    }),
+    "Forecasts",
   );
 }
