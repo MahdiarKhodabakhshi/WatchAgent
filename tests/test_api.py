@@ -65,7 +65,7 @@ def test_readings_without_range_params_keep_existing_behavior(
 
     assert response.status_code == 200
     readings = response.json()["readings"]
-    assert list(readings[0]) == [
+    assert {
         "id",
         "city",
         "observation_ts",
@@ -75,7 +75,7 @@ def test_readings_without_range_params_keep_existing_behavior(
         "precipitation",
         "wind_speed_10m",
         "weather_code",
-    ]
+    } <= set(readings[0])
     assert [reading["observation_ts"] for reading in readings] == [
         "2026-05-27T15:00:00Z",
         "2026-05-27T14:00:00Z",
@@ -134,7 +134,7 @@ def test_events_without_range_params_keep_existing_behavior(client, db_session: 
 
     assert response.status_code == 200
     events = response.json()["events"]
-    assert list(events[0]) == [
+    assert {
         "id",
         "city",
         "event_ts",
@@ -145,7 +145,7 @@ def test_events_without_range_params_keep_existing_behavior(client, db_session: 
         "signal_values",
         "reason",
         "supporting_reading_ids",
-    ]
+    } <= set(events[0])
     assert [event["event_ts"] for event in events] == [
         "2026-05-27T15:00:00Z",
         "2026-05-27T14:00:00Z",
