@@ -59,7 +59,15 @@ interface MetricChartProps {
 interface EventMarkerShapeProps {
   cx?: number;
   cy?: number;
-  payload?: EventMarkerDatum;
+  payload?: Partial<EventMarkerDatum>;
+}
+
+function isEventMarkerDatum(payload: Partial<EventMarkerDatum> | undefined): payload is EventMarkerDatum {
+  return (
+    payload?.event !== undefined &&
+    typeof payload.event.id === "number" &&
+    typeof payload.value === "number"
+  );
 }
 
 function EventMarker({
@@ -72,7 +80,7 @@ function EventMarker({
   onSelectEvent: (event: WatchEvent) => void;
 }) {
   const { cx, cy, payload } = shapeProps;
-  if (cx === undefined || cy === undefined || payload === undefined) {
+  if (cx === undefined || cy === undefined || !isEventMarkerDatum(payload)) {
     return <g />;
   }
 
