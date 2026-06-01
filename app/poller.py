@@ -154,7 +154,7 @@ def process_reading(
         )
         if not resolved_settings.enable_fun_facts:
             events = [event for event in events if event.event_type != "fun_fact"]
-        stored_events = store_events(session, events)
+        stored_events = store_events(session, events, observed_reading=reading)
         session.commit()
 
         log.info(

@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -102,7 +102,10 @@ def get_events(
         query = query.where(Event.event_ts >= start_utc)
     if end_utc is not None:
         query = query.where(Event.event_ts <= end_utc)
-    query = query.order_by(Event.event_ts.desc()).limit(limit)
+    query = query.order_by(
+        desc(Event.priority_score).nulls_last(),
+        Event.event_ts.desc(),
+    ).limit(limit)
     return {"events": list(db.scalars(query).all())}
 
 

@@ -88,6 +88,11 @@ export function EventDetail({ event, onClose }: EventDetailProps) {
                 {baselineKind}
               </span>
             ) : null}
+            {event.status ? (
+              <span className="inline-flex h-7 items-center rounded-panel border border-border bg-surface-2 px-2 text-xs uppercase tracking-label text-text-muted">
+                {event.status}
+              </span>
+            ) : null}
           </div>
         </header>
 
@@ -97,6 +102,16 @@ export function EventDetail({ event, onClose }: EventDetailProps) {
             <Field label="Metric" value={event.metric ?? "--"} />
             <Field label="Event ts" value={fmtTime(event.event_ts)} />
             <Field label="Created at" value={fmtTime(event.created_at)} />
+            <Field
+              label="Priority"
+              value={event.priority_score !== null ? event.priority_score.toFixed(1) : "--"}
+            />
+            <Field label="Onset" value={event.onset_ts ? fmtTime(event.onset_ts) : "--"} />
+            <Field label="Peak" value={event.peak_ts ? fmtTime(event.peak_ts) : "--"} />
+            <Field
+              label="Resolved"
+              value={event.resolved_ts ? fmtTime(event.resolved_ts) : "--"}
+            />
           </div>
 
           <section className="mb-5">

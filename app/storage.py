@@ -9,6 +9,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.detection.base import Event as DetectionEvent
+from app.detection.lifecycle import apply_lifecycle
+from app.detection.scoring import candidate_priority_score, severity_from_score
 from app.models import Event, Forecast, Reading
 from app.open_meteo import CITY_NAMES
 
@@ -91,26 +93,49 @@ def store_events(
     session: Session,
     events: Iterable[DetectionEvent],
     *,
+    observed_reading: Reading | None = None,
     created_at: datetime | None = None,
 ) -> list[Event]:
     now = created_at or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("created_at must be timezone-aware")
 
-    rows = [
-        Event(
-            city=event.city,
-            event_ts=event.event_ts,
-            created_at=now.astimezone(timezone.utc),
-            event_type=event.event_type,
-            severity=event.severity,
-            metric=event.metric,
-            signal_values=event.signal_values,
-            reason=event.reason,
-            supporting_reading_ids=event.supporting_reading_ids,
+    if observed_reading is not None:
+        return apply_lifecycle(
+            session,
+            events,
+            observed_reading=observed_reading,
+            created_at=now,
         )
-        for event in events
-    ]
+
+    rows: list[Event] = []
+    for event in events:
+        score = candidate_priority_score(event)
+        rows.append(
+            Event(
+                city=event.city,
+                event_ts=event.event_ts,
+                created_at=now.astimezone(timezone.utc),
+                event_type=event.event_type,
+                severity=severity_from_score(score),
+                metric=event.metric,
+                signal_values=event.signal_values,
+                reason=event.reason,
+                supporting_reading_ids=event.supporting_reading_ids,
+                status="open",
+                onset_ts=event.event_ts,
+                peak_ts=event.event_ts,
+                resolved_ts=None,
+                priority_score=score,
+                confidence=None,
+                rarity_percentile=None,
+                detector_name=event.event_type,
+                detector_version="legacy-direct-v1",
+                dedupe_key=None,
+                related_event_ids=[],
+                evidence=dict(event.signal_values),
+            )
+        )
     session.add_all(rows)
     session.flush()
     return rows

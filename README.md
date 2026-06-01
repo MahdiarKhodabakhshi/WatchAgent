@@ -250,6 +250,14 @@ rewrite, `app.detection.base.Event` remains a compatibility alias for `EventCand
 explanation helpers are pure and tested, but are not wired into stored severity or feed ordering
 until the lifecycle phase.
 
+### Lifecycle incidents
+
+Detector candidates now flow through a DB-backed lifecycle manager before storage. A stable
+`dedupe_key` built from city, event type, metric, and any relevant peer/kind identity collapses
+repeated candidates into one incident row with `status`, `onset_ts`, `peak_ts`, `resolved_ts`, and
+`priority_score`. Open incidents survive poller restarts because enter/clear counters live in the
+`incident_states` table. `/events` remains additive and sorts by `priority_score` first.
+
 ### Diurnal-aware baselines
 
 A 24-hour rolling mean treats 3pm the same as 3am. In cities with large diurnal temperature swings,

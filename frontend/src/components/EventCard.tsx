@@ -41,6 +41,16 @@ export function EventCard({ event, selected = false, onSelect }: EventCardProps)
           <Icon aria-hidden="true" size={13} />
           {severityLabel(event.severity)}
         </span>
+        {event.status ? (
+          <span className="inline-flex h-7 items-center rounded-panel border border-border bg-surface-2 px-2 text-xs uppercase tracking-label text-text-muted">
+            {event.status}
+          </span>
+        ) : null}
+        {event.priority_score !== null ? (
+          <span className="inline-flex h-7 items-center rounded-panel border border-border bg-surface-2 px-2 text-xs uppercase tracking-label text-text-muted">
+            {Math.round(event.priority_score)}
+          </span>
+        ) : null}
       </div>
 
       <p className="reason-clamp m-0 text-base leading-6 text-text" title={event.reason}>

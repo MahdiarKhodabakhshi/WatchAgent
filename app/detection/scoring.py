@@ -12,6 +12,11 @@ SCORE_WEIGHTS = {
     "spatial": 0.10,
     "confidence": 0.05,
 }
+LEGACY_SEVERITY_SCORE = {
+    "info": 20.0,
+    "warning": 45.0,
+    "severe": 70.0,
+}
 
 
 def priority_score(
@@ -27,9 +32,16 @@ def priority_score(
 
 
 def candidate_priority_score(candidate: Any, *, duplicate_penalty: float = 0.0) -> float:
-    return priority_score(
-        getattr(candidate, "score_inputs", {}),
-        duplicate_penalty=duplicate_penalty,
+    explicit_inputs = getattr(candidate, "score_inputs", {})
+    if explicit_inputs:
+        return priority_score(explicit_inputs, duplicate_penalty=duplicate_penalty)
+    return round(
+        max(
+            0.0,
+            min(100.0, LEGACY_SEVERITY_SCORE.get(getattr(candidate, "severity", "info"), 20.0)),
+        )
+        - duplicate_penalty,
+        3,
     )
 
 

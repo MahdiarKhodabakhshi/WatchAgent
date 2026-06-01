@@ -115,3 +115,19 @@ class Event(Base):
         JSON, nullable=True, default=list,
     )
     evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, default=dict)
+
+
+class IncidentState(Base):
+    __tablename__ = "incident_states"
+
+    dedupe_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    city: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric: Mapped[str | None] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    enter_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clear_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_seen_ts: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_seen_ts: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    active_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state_values: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
