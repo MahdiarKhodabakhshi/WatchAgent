@@ -14,8 +14,8 @@ def test_default_climatology_artifact_loads() -> None:
     z = climatology.z_hod("Toronto", "temperature_2m", 20.0, BASE_TS)
 
     assert climatology.data["date_range"] == {
-        "start": "2021-01-01",
-        "end": "2025-12-31",
+        "start": "2015-01-01",
+        "end": "2021-12-31",
     }
     assert z.bucket == "hod"
     assert z.n >= 100

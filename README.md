@@ -66,8 +66,12 @@ historical readings.
 Runtime code loads the committed climatology artifact. To refresh it offline:
 
 ```bash
-python3 scripts/build_climatology.py --start-date 2021-01-01 --end-date 2025-12-31
+python3 scripts/build_climatology.py --start-date 2015-01-01 --end-date 2021-12-31
 ```
+
+The committed artifact is intentionally fit on a historical training window. Evaluation replays
+use a later disjoint test window so detector-rate claims are not measured on the same years used
+to define seasonal baselines.
 
 ## Architecture
 
@@ -209,7 +213,7 @@ spatial separation, and confidence. `priority_score` is a weighted 0-100 value, 
 |---|---|---|---|
 | `temperature_shock` | Sudden temperature jumps that are unusual for that city and hour. | Local-hour `z_hod` plus a 3-hour temperature derivative. | `abs(z_hod) >= 3.0` and `abs(delta_3h) >= 5C`. This preserves the useful diurnal-aware baseline from the old rapid-change rule while filtering routine afternoon warming. |
 | `pressure_plunge` | Pressure falls that often precede stormy conditions. | 3-hour sea-level pressure fall, checked against local pressure behavior and confirmed by wind/gust rise. | At least a 6 hPa fall plus wind corroboration. Replay showed weaker falls were ordinary weather noise, so the threshold keeps only sharper, compound signals. |
-| `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod >= 3.0`. This replaces spammy `sustained_extreme`; 50,615 old raw firings became 123 warm/cold spell incidents. |
+| `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod >= 3.0`. This replaces spammy `sustained_extreme`; in the 2022-2025 test replay, 67,513 old raw firings became 172 warm/cold spell incidents. |
 | `cold_spell` | Persistent locally extreme cold. | Temperature `z_hod` below the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod <= -3.0`. The same spell hypothesis as warm spells, with score magnitude lifting extreme cold outbreaks to severe. |
 | `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount at least `max(wet p95, 10 mm)`, or 6-hour accumulation at least 10 mm. The wet/dry split avoids zero-dominated medians; Toronto/Ottawa flood spot checks drove the accumulation scoring. |
 | `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | `z_hod >= 3.2` or gust around 90 km/h. The replay rate landed near other direct hazard detectors after raising the z threshold. |
@@ -247,31 +251,34 @@ shape.
 The replayable evidence lives in [EVALUATION.md](EVALUATION.md):
 
 ```bash
-python3 scripts/evaluate.py --source archive --start-date 2023-01-01 --end-date 2025-12-31
+python3 scripts/evaluate.py --source archive --start-date 2022-01-01 --end-date 2025-12-31
 ```
 
-Current 2023-2025 archive replay:
+Current DS-1 replay uses the committed 2015-2021 climatology artifact as training data and
+measures rates on the disjoint 2022-2025 archive test window. This removes train/test leakage,
+while acknowledging that a fixed historical climate baseline can drift as climate and observing
+systems change.
 
-- Legacy raw detector firings: **95,077**
-- Native lifecycle incidents: **753**
-- Overall rate: **0.229 incidents/city-day**
-- Raw-firing to incident collapse ratio: **4.27x** on native candidates
-- `sustained_extreme` replacement: **50,615 raw firings -> 123 spell incidents**
+- Legacy raw detector firings: **127,164**
+- Native lifecycle incidents: **1,121**
+- Overall rate: **0.256 incidents/city-day**
+- Raw-firing to incident collapse ratio: **4.33x** on native candidates
+- `sustained_extreme` replacement: **67,513 raw firings -> 172 spell incidents**
 
 Per-type after-state:
 
 | detector_type | incidents | per_city_day |
 |---|---:|---:|
-| `temperature_shock` | 19 | 0.006 |
-| `pressure_plunge` | 35 | 0.011 |
-| `warm_spell` | 63 | 0.019 |
-| `cold_spell` | 60 | 0.018 |
-| `heavy_rain_burst` | 240 | 0.073 |
-| `wind_gust_burst` | 227 | 0.069 |
-| `heat_stress` | 45 | 0.014 |
-| `cold_stress` | 30 | 0.009 |
+| `temperature_shock` | 21 | 0.005 |
+| `pressure_plunge` | 52 | 0.012 |
+| `warm_spell` | 101 | 0.023 |
+| `cold_spell` | 71 | 0.016 |
+| `heavy_rain_burst` | 333 | 0.076 |
+| `wind_gust_burst` | 334 | 0.076 |
+| `heat_stress` | 53 | 0.012 |
+| `cold_stress` | 70 | 0.016 |
 | `forecast_bust` | 0 | 0.000 |
-| `spatial_anomaly` | 34 | 0.010 |
+| `spatial_anomaly` | 86 | 0.020 |
 
 Forecast-bust is zero in archive replay because Open-Meteo archive provides observations, not
 the forecasts issued at the time. The detector fires in
@@ -285,7 +292,7 @@ Known-event spot checks from the same replay:
 |---|---|---|
 | Toronto heavy rainfall/flooding | 2024-07-16 | `heavy_rain_burst / precipitation`, priority 67.0, severe |
 | Vancouver January deep freeze | 2024-01-12 | `cold_spell / temperature_2m`, priority 70.0, severe |
-| Ottawa severe thunderstorm/outages | 2023-06-26 | `heavy_rain_burst / precipitation`, priority 65.2, severe |
+| Ottawa severe thunderstorm/outages | 2023-06-26 | `heavy_rain_burst / precipitation`, priority 66.2, severe |
 
 ### Deliberately Out Of Scope
 

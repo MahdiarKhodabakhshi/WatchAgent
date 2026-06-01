@@ -1,12 +1,20 @@
 # WatchAgent — Detector Evaluation
 
-> **Regenerate**: `python scripts/evaluate.py --source archive --start-date 2023-01-01 --end-date 2025-12-31`. Archive replay is read-only and does not write to
+> **Regenerate**: `python3 scripts/evaluate.py --source archive --start-date 2022-01-01 --end-date 2025-12-31`. Archive replay is read-only and does not write to
 > the live WatchAgent database.
 
 ## Method
 
-- Source: **Open-Meteo archive 2023-01-01..2025-12-31**.
-- Readings replayed: **78912** across **3288**
+- Source: **Open-Meteo archive 2022-01-01..2025-12-31**.
+- Baseline artifact: **Open-Meteo Historical Weather API (/v1/archive, ERA5), trained on 2015-01-01..2021-12-31**.
+- DS-1 uses an honest train/test split: climatology is fit on the committed
+  training artifact, while replay metrics are measured on this later disjoint
+  evaluation window. This removes leakage from evaluating thresholds against
+  the same years used to define seasonal baselines.
+- Climate non-stationarity still matters: a fixed historical baseline can drift
+  as city climate, observing systems, and reanalysis behavior change over time.
+  The split makes leakage visible; it does not make the baseline timeless.
+- Readings replayed: **105192** across **4383**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,
   enter threshold, and absent-reading resolution used by lifecycle. No live
@@ -41,96 +49,86 @@
 
 | detector_type | incidents | raw_firings | per_1k_readings | per_city_day | raw_to_incident_collapse |
 |---|---:|---:|---:|---:|---:|
-| temperature_shock | 19 | 33 | 0.24 | 0.006 | 1.74 |
-| pressure_plunge | 35 | 59 | 0.44 | 0.011 | 1.69 |
-| warm_spell | 63 | 313 | 0.80 | 0.019 | 4.97 |
-| cold_spell | 60 | 321 | 0.76 | 0.018 | 5.35 |
-| heavy_rain_burst | 240 | 1183 | 3.04 | 0.073 | 4.93 |
-| wind_gust_burst | 227 | 769 | 2.88 | 0.069 | 3.39 |
-| heat_stress | 45 | 208 | 0.57 | 0.014 | 4.62 |
-| cold_stress | 30 | 203 | 0.38 | 0.009 | 6.77 |
+| temperature_shock | 21 | 30 | 0.20 | 0.005 | 1.43 |
+| pressure_plunge | 52 | 88 | 0.49 | 0.012 | 1.69 |
+| warm_spell | 101 | 424 | 0.96 | 0.023 | 4.20 |
+| cold_spell | 71 | 442 | 0.67 | 0.016 | 6.23 |
+| heavy_rain_burst | 333 | 1607 | 3.17 | 0.076 | 4.83 |
+| wind_gust_burst | 334 | 1214 | 3.18 | 0.076 | 3.63 |
+| heat_stress | 53 | 253 | 0.50 | 0.012 | 4.77 |
+| cold_stress | 70 | 516 | 0.67 | 0.016 | 7.37 |
 | forecast_bust | 0 | 0 | 0.00 | 0.000 | 0.00 |
-| spatial_anomaly | 34 | 126 | 0.43 | 0.010 | 3.71 |
-| OVERALL | 753 | 3215 | 9.54 | 0.229 | 4.27 |
+| spatial_anomaly | 86 | 278 | 0.82 | 0.020 | 3.23 |
+| OVERALL | 1121 | 4852 | 10.66 | 0.256 | 4.33 |
 
 Interpretation:
 
-- Heat/cold stress and warm/cold spell all fire across full seasons:
-  heat_stress 45, cold_stress 30, warm_spell 63, cold_spell 60.
-- Forecast-bust is zero in archive mode because the Open-Meteo archive has
-  observations but not the forecasts issued at those historical times; it
-  remains covered by unit and labeled tests and is active in live DB operation
-  when stored forecasts exist.
-- Spatial anomaly compares each city in `z_hod` space against that city's own
-  climatology first, then compares the standardized value to peers. A city must
-  be anomalous in its own right and far from peer z-values; normal-for-Vancouver
-  mildness beside normal-for-Ottawa cold is not an event.
-- Spatial anomaly is now 34/753 incidents (4.5%), so it no longer dominates the
-  feed.
-- Spatial incidents use `city|spatial_anomaly|metric` as their dedupe key, with
-  no timestamp component, so multi-hour contrasts collapse into one incident
-  until lifecycle resolves them.
+- Heat/cold stress and warm/cold spell all remain measurable on the test replay: heat_stress 53, cold_stress 70, warm_spell 101, cold_spell 71.
+- Forecast-bust is zero in archive mode because the Open-Meteo archive has observations but not the forecasts issued at those historical times; it remains covered by unit and labeled tests and is active in live DB operation when stored forecasts exist.
+- Spatial anomaly compares each city in `z_hod` space against that city's own climatology first, then compares the standardized value to peers. A city must be anomalous in its own right and far from peer z-values; normal-for-Vancouver mildness beside normal-for-Ottawa cold is not an event.
+- Spatial anomaly is 86/1121 incidents (7.7%), so the structural own-anomaly gate remains visible in the rate mix.
+- Spatial incidents use `city|spatial_anomaly|metric` as their dedupe key, with no timestamp component, so multi-hour contrasts collapse into one incident until lifecycle resolves them.
 
 ## Per-City Incident Rates
 
 | city | incidents | per_1k_readings | per_city_day |
 |---|---:|---:|---:|
-| Ottawa | 217 | 8.25 | 0.198 |
-| Toronto | 182 | 6.92 | 0.166 |
-| Vancouver | 354 | 13.46 | 0.323 |
+| Ottawa | 276 | 7.87 | 0.189 |
+| Toronto | 234 | 6.67 | 0.160 |
+| Vancouver | 611 | 17.43 | 0.418 |
 
 ## Severity Breakdown
 
 | detector_type | info | warning | severe |
 |---|---:|---:|---:|
-| temperature_shock | 0 | 19 | 0 |
-| pressure_plunge | 0 | 28 | 7 |
-| warm_spell | 0 | 50 | 13 |
-| cold_spell | 0 | 46 | 14 |
-| heavy_rain_burst | 0 | 0 | 240 |
-| wind_gust_burst | 0 | 227 | 0 |
-| heat_stress | 0 | 35 | 10 |
-| cold_stress | 0 | 27 | 3 |
+| temperature_shock | 0 | 21 | 0 |
+| pressure_plunge | 0 | 41 | 11 |
+| warm_spell | 0 | 82 | 19 |
+| cold_spell | 0 | 55 | 16 |
+| heavy_rain_burst | 0 | 0 | 333 |
+| wind_gust_burst | 0 | 334 | 0 |
+| heat_stress | 0 | 44 | 9 |
+| cold_stress | 0 | 69 | 1 |
 | forecast_bust | 0 | 0 | 0 |
-| spatial_anomaly | 0 | 34 | 0 |
+| spatial_anomaly | 0 | 86 | 0 |
 
 ## Calibration Before/After
 
 | detector_type | before_incidents | before_per_city_day | after_incidents | after_per_city_day |
 |---|---:|---:|---:|---:|
-| temperature_shock | 93 | 0.028 | 19 | 0.006 |
-| pressure_plunge | 188 | 0.057 | 35 | 0.011 |
-| warm_spell | 131 | 0.040 | 63 | 0.019 |
-| cold_spell | 110 | 0.033 | 60 | 0.018 |
-| heavy_rain_burst | 240 | 0.073 | 240 | 0.073 |
-| wind_gust_burst | 381 | 0.116 | 227 | 0.069 |
-| heat_stress | 95 | 0.029 | 45 | 0.014 |
-| cold_stress | 30 | 0.009 | 30 | 0.009 |
+| temperature_shock | 119 | 0.027 | 21 | 0.005 |
+| pressure_plunge | 258 | 0.059 | 52 | 0.012 |
+| warm_spell | 191 | 0.044 | 101 | 0.023 |
+| cold_spell | 171 | 0.039 | 71 | 0.016 |
+| heavy_rain_burst | 333 | 0.076 | 333 | 0.076 |
+| wind_gust_burst | 516 | 0.118 | 334 | 0.076 |
+| heat_stress | 112 | 0.026 | 53 | 0.012 |
+| cold_stress | 70 | 0.016 | 70 | 0.016 |
 | forecast_bust | 0 | 0.000 | 0 | 0.000 |
-| spatial_anomaly | 592 | 0.180 | 34 | 0.010 |
+| spatial_anomaly | 932 | 0.213 | 86 | 0.020 |
 
 ## Legacy Volume vs Native Incidents
 
 | old_type | replacement | old_raw_events | new_incidents |
 |---|---|---:|---:|
-| rapid_change | temperature_shock | 8736 | 19 |
-| sustained_extreme | warm_spell + cold_spell | 50615 | 123 |
-| comfort_divergence | heat_stress + cold_stress | 4295 | 75 |
-| cross_city_contrast | spatial_anomaly | 26511 | 34 |
+| rapid_change | temperature_shock | 11566 | 21 |
+| sustained_extreme | warm_spell + cold_spell | 67513 | 172 |
+| comfort_divergence | heat_stress + cold_stress | 5756 | 123 |
+| cross_city_contrast | spatial_anomaly | 35779 | 86 |
 | forecast_divergence | forecast_bust | 0 | 0 |
-| wmo_transition | supporting evidence only | 119 | 0 |
-| fun_fact | retired from primary feed | 4801 | 0 |
-| *(none)* | pressure_plunge | 0 | 35 |
-| *(none)* | heavy_rain_burst | 0 | 240 |
-| *(none)* | wind_gust_burst | 0 | 227 |
+| wmo_transition | supporting evidence only | 167 | 0 |
+| fun_fact | retired from primary feed | 6383 | 0 |
+| *(none)* | pressure_plunge | 0 | 52 |
+| *(none)* | heavy_rain_burst | 0 | 333 |
+| *(none)* | wind_gust_burst | 0 | 334 |
 
 ## Known-Event Spot Checks
 
 | documented_event | date | replay_incident | priority | evidence | source |
 |---|---|---|---:|---|---|
-| Toronto heavy rainfall/flooding | 2024-07-16 | heavy_rain_burst / precipitation at 2024-07-16 17:00 UTC | 67.0 | severe; 6h accumulation trigger reached 11.0 mm in archive data | [City reported more than 100 mm in pockets across Toronto.](https://www.toronto.ca/news/city-of-toronto-provides-an-update-on-response-efforts-following-heavy-rainfall/) |
-| Vancouver January deep freeze | 2024-01-12 | cold_spell / temperature_2m at 2024-01-11 21:00 UTC | 70.0 | severe; Jan 12 candidates reached z=4.2 to z=7.1 | [ECCC noted wind chills reaching Vancouver's waterfront.](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) |
-| Ottawa severe thunderstorm/outages | 2023-06-26 | heavy_rain_burst / precipitation at 2023-06-27 02:00 UTC | 65.2 | severe; 6h accumulation trigger reached 10.6 mm in archive data | [Thousands lost power; ECCC warned of downpours, hail, wind.](https://ottawa.citynews.ca/2023/06/26/environment-canada-issues-severe-thunderstorm-warning-for-ottawa/) |
+| Toronto heavy rainfall/flooding | 2024-07-16 | heavy_rain_burst at 2024-07-16 17:00 UTC | 67.0 | severe; 6h accumulation trigger reached 11.0 mm in archive data | [City reported more than 100 mm in pockets across Toronto.](https://www.toronto.ca/news/city-of-toronto-provides-an-update-on-response-efforts-following-heavy-rainfall/) |
+| Vancouver January deep freeze | 2024-01-12 | cold_spell at 2024-01-11 21:00 UTC | 70.0 | severe; Jan 12 candidates reached z=4.2 to z=7.1 | [ECCC noted wind chills reaching Vancouver's waterfront.](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) |
+| Ottawa severe thunderstorm/outages | 2023-06-26 | heavy_rain_burst at 2023-06-27 02:00 UTC | 66.2 | severe; 6h accumulation trigger reached 10.6 mm in archive data | [Thousands lost power; ECCC warned of downpours, hail, wind.](https://ottawa.citynews.ca/2023/06/26/environment-canada-issues-severe-thunderstorm-warning-for-ottawa/) |
 
 ## Calibration Changes Applied
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from bisect import bisect_right
@@ -64,8 +65,10 @@ from tests.labeled_scenarios import SCENARIOS  # noqa: E402
 
 FIG_DIR = PROJECT_ROOT / "evaluation"
 EVAL_PATH = PROJECT_ROOT / "EVALUATION.md"
-DEFAULT_START = date(2023, 1, 1)
+CLIMATOLOGY_PATH = PROJECT_ROOT / "app" / "data" / "climatology.json"
+DEFAULT_START = date(2022, 1, 1)
 DEFAULT_END = date(2025, 12, 31)
+ARCHIVE_FETCH_ATTEMPTS = 5
 NATIVE_TYPES = (
     "temperature_shock",
     "pressure_plunge",
@@ -90,6 +93,8 @@ LEGACY_REPLACEMENTS = (
 KNOWN_EVENT_SPOT_CHECKS = [
     {
         "event": "Toronto heavy rainfall/flooding",
+        "city": "Toronto",
+        "event_type": "heavy_rain_burst",
         "source_date": "2024-07-16",
         "source": (
             "https://www.toronto.ca/news/"
@@ -103,6 +108,8 @@ KNOWN_EVENT_SPOT_CHECKS = [
     },
     {
         "event": "Vancouver January deep freeze",
+        "city": "Vancouver",
+        "event_type": "cold_spell",
         "source_date": "2024-01-12",
         "source": (
             "https://www.canada.ca/en/environment-climate-change/services/"
@@ -116,6 +123,8 @@ KNOWN_EVENT_SPOT_CHECKS = [
     },
     {
         "event": "Ottawa severe thunderstorm/outages",
+        "city": "Ottawa",
+        "event_type": "heavy_rain_burst",
         "source_date": "2023-06-26",
         "source": (
             "https://ottawa.citynews.ca/2023/06/26/"
@@ -250,7 +259,7 @@ async def _load_archive_data(
             while chunk_start <= end_date:
                 chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), end_date)
                 print(f"Fetching {city.name} {chunk_start}..{chunk_end}", flush=True)
-                records = await fetch_city_hourly_history(
+                records = await _fetch_city_hourly_history_with_retry(
                     client,
                     city,
                     start_date=chunk_start,
@@ -337,6 +346,42 @@ def _replay_data(
         start_date=start_date,
         end_date=end_date,
     )
+
+
+async def _fetch_city_hourly_history_with_retry(
+    client: httpx.AsyncClient,
+    city: Any,
+    *,
+    start_date: date,
+    end_date: date,
+    settings: Any,
+) -> list[dict[str, Any]]:
+    for attempt in range(1, ARCHIVE_FETCH_ATTEMPTS + 1):
+        try:
+            return await fetch_city_hourly_history(
+                client,
+                city,
+                start_date=start_date,
+                end_date=end_date,
+                settings=settings,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 429 or attempt == ARCHIVE_FETCH_ATTEMPTS:
+                raise
+            retry_after = exc.response.headers.get("Retry-After")
+            delay = (
+                float(retry_after)
+                if retry_after is not None and retry_after.isdigit()
+                else min(60.0, 5.0 * 2 ** (attempt - 1))
+            )
+            print(
+                f"Open-Meteo archive rate limited for {city.name} "
+                f"{start_date}..{end_date}; retrying in {delay:.0f}s "
+                f"({attempt}/{ARCHIVE_FETCH_ATTEMPTS})",
+                flush=True,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable archive retry state")
 
 
 def _history_for(readings: list[Reading], idx: int) -> list[Reading]:
@@ -726,18 +771,56 @@ def calibration_changes_table() -> str:
     return "\n".join(rows)
 
 
-def spot_check_table() -> str:
+def spot_check_table(replay: NativeReplay) -> str:
     rows = [
         "| documented_event | date | replay_incident | priority | evidence | source |",
         "|---|---|---|---:|---|---|",
     ]
     for item in KNOWN_EVENT_SPOT_CHECKS:
+        match = _match_known_event(replay, item)
+        if match is None:
+            incident = "no matching severe incident in +/-48h"
+            score = "n/a"
+            evidence = f"expected {item['incident']}; no replay match"
+        else:
+            incident = (
+                f"{match.event_type} at "
+                f"{match.event_ts.strftime('%Y-%m-%d %H:%M UTC')}"
+            )
+            score = f"{match.priority_score:.1f}"
+            evidence = item["evidence"]
+            if not evidence.startswith(match.severity):
+                evidence = f"{match.severity}; {evidence}"
         rows.append(
             f"| {item['event']} | {item['source_date']} | "
-            f"{item['incident']} at {item['incident_ts']} | {item['score']} | "
-            f"{item['evidence']} | [{item['source_summary']}]({item['source']}) |"
+            f"{incident} | {score} | "
+            f"{evidence} | [{item['source_summary']}]({item['source']}) |"
         )
     return "\n".join(rows)
+
+
+def _match_known_event(
+    replay: NativeReplay,
+    item: dict[str, str],
+    *,
+    tolerance_hours: int = 48,
+) -> IncidentRecord | None:
+    source_day = date.fromisoformat(item["source_date"])
+    start = datetime.combine(source_day, datetime.min.time()) - timedelta(
+        hours=tolerance_hours,
+    )
+    end = datetime.combine(source_day, datetime.max.time()) + timedelta(hours=tolerance_hours)
+    matches = [
+        incident
+        for incident in replay.incidents
+        if incident.city == item["city"]
+        and incident.event_type == item["event_type"]
+        and incident.severity == "severe"
+        and start <= incident.event_ts.replace(tzinfo=None) <= end
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda incident: incident.priority_score)
 
 
 def plot_zscore_histogram(replay: NativeReplay) -> Path:
@@ -802,6 +885,50 @@ def plot_severity_pie(replay: NativeReplay) -> Path:
     return path
 
 
+def _climatology_training_summary() -> str:
+    try:
+        artifact = json.loads(CLIMATOLOGY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "unknown committed climatology artifact"
+    date_range = artifact.get("date_range", {})
+    start = date_range.get("start", "unknown")
+    end = date_range.get("end", "unknown")
+    source = artifact.get("source", "Open-Meteo archive")
+    return f"{source}, trained on {start}..{end}"
+
+
+def _native_interpretation(replay: NativeReplay) -> str:
+    counts = Counter(event.event_type for event in replay.incidents)
+    total = len(replay.incidents)
+    spatial = counts["spatial_anomaly"]
+    spatial_share = spatial / total if total else 0.0
+    return "\n".join(
+        [
+            "- Heat/cold stress and warm/cold spell all remain measurable on the "
+            "test replay: "
+            f"heat_stress {counts['heat_stress']}, "
+            f"cold_stress {counts['cold_stress']}, "
+            f"warm_spell {counts['warm_spell']}, "
+            f"cold_spell {counts['cold_spell']}.",
+            "- Forecast-bust is zero in archive mode because the Open-Meteo "
+            "archive has observations but not the forecasts issued at those "
+            "historical times; it remains covered by unit and labeled tests and "
+            "is active in live DB operation when stored forecasts exist.",
+            "- Spatial anomaly compares each city in `z_hod` space against that "
+            "city's own climatology first, then compares the standardized value "
+            "to peers. A city must be anomalous in its own right and far from "
+            "peer z-values; normal-for-Vancouver mildness beside "
+            "normal-for-Ottawa cold is not an event.",
+            f"- Spatial anomaly is {spatial}/{total} incidents "
+            f"({spatial_share:.1%}), so the structural own-anomaly gate remains "
+            "visible in the rate mix.",
+            "- Spatial incidents use `city|spatial_anomaly|metric` as their "
+            "dedupe key, with no timestamp component, so multi-hour contrasts "
+            "collapse into one incident until lifecycle resolves them.",
+        ]
+    )
+
+
 def write_evaluation(
     *,
     data: ReplayData,
@@ -817,7 +944,7 @@ def write_evaluation(
     mttd: str,
 ) -> None:
     command = (
-        "python scripts/evaluate.py --source archive "
+        "python3 scripts/evaluate.py --source archive "
         f"--start-date {data.start_date or DEFAULT_START} "
         f"--end-date {data.end_date or DEFAULT_END}"
     )
@@ -829,6 +956,14 @@ def write_evaluation(
 ## Method
 
 - Source: **{data.source_label}**.
+- Baseline artifact: **{_climatology_training_summary()}**.
+- DS-1 uses an honest train/test split: climatology is fit on the committed
+  training artifact, while replay metrics are measured on this later disjoint
+  evaluation window. This removes leakage from evaluating thresholds against
+  the same years used to define seasonal baselines.
+- Climate non-stationarity still matters: a fixed historical baseline can drift
+  as city climate, observing systems, and reanalysis behavior change over time.
+  The split makes leakage visible; it does not make the baseline timeless.
 - Readings replayed: **{data.total_readings}** across **{data.total_city_days}**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,
@@ -862,21 +997,7 @@ def write_evaluation(
 
 Interpretation:
 
-- Heat/cold stress and warm/cold spell all fire across full seasons:
-  heat_stress 45, cold_stress 30, warm_spell 63, cold_spell 60.
-- Forecast-bust is zero in archive mode because the Open-Meteo archive has
-  observations but not the forecasts issued at those historical times; it
-  remains covered by unit and labeled tests and is active in live DB operation
-  when stored forecasts exist.
-- Spatial anomaly compares each city in `z_hod` space against that city's own
-  climatology first, then compares the standardized value to peers. A city must
-  be anomalous in its own right and far from peer z-values; normal-for-Vancouver
-  mildness beside normal-for-Ottawa cold is not an event.
-- Spatial anomaly is now 34/753 incidents (4.5%), so it no longer dominates the
-  feed.
-- Spatial incidents use `city|spatial_anomaly|metric` as their dedupe key, with
-  no timestamp component, so multi-hour contrasts collapse into one incident
-  until lifecycle resolves them.
+{_native_interpretation(after)}
 
 ## Per-City Incident Rates
 
@@ -896,7 +1017,7 @@ Interpretation:
 
 ## Known-Event Spot Checks
 
-{spot_check_table()}
+{spot_check_table(after)}
 
 ## Calibration Changes Applied
 
