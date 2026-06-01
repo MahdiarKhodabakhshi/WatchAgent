@@ -113,8 +113,8 @@ def test_phase0_pure_detection_outputs_for_fixed_sequence() -> None:
     )
     current = _reading(
         id=100,
-        temperature_2m=28.0,
-        precipitation=18.0,
+        temperature_2m=32.0,
+        precipitation=12.0,
         pressure_msl=1000.0,
         wind_gusts_10m=55.0,
     )
@@ -122,7 +122,7 @@ def test_phase0_pure_detection_outputs_for_fixed_sequence() -> None:
         id=200,
         city="Toronto",
         temperature_2m=20.0,
-        precipitation=18.0,
+        precipitation=12.0,
         pressure_msl=1000.0,
         wind_gusts_10m=55.0,
     )
@@ -153,16 +153,16 @@ def test_phase0_pure_detection_outputs_for_fixed_sequence() -> None:
     ]
 
     shock = _only(events, "temperature_shock", "temperature_2m")
-    assert shock.signal_values["z_score"] == 4.0
-    assert shock.signal_values["delta_c"] == 6.0
+    assert shock.signal_values["z_score"] == 6.0
+    assert shock.signal_values["delta_c"] == 10.0
 
     pressure = _only(events, "pressure_plunge", "pressure_msl")
     assert pressure.signal_values["pressure_fall_hpa"] == 7.0
     assert pressure.signal_values["wind_rise_kmh"] == 20.0
 
     forecast_temp = _only(events, "forecast_bust", "temperature_2m")
-    assert forecast_temp.signal_values["abs_error"] == 8.0
-    assert forecast_temp.signal_values["normalized_error"] == 8.0
+    assert forecast_temp.signal_values["abs_error"] == 12.0
+    assert forecast_temp.signal_values["normalized_error"] == 12.0
 
 
 def _reading(

@@ -142,7 +142,7 @@ SCENARIOS: list[Scenario] = [
         name="heavy_rain_wet_hour_only",
         description="Wet-hour amount exceeds local wet-hour p95 and absolute floor.",
         history=_history(),
-        reading=_reading(id=101, precipitation=18.0),
+        reading=_reading(id=101, precipitation=12.0),
         expected_types={"heavy_rain_burst"},
     ),
     Scenario(
@@ -165,7 +165,7 @@ SCENARIOS: list[Scenario] = [
         name="spatial_anomaly_z_space",
         description="Peer comparison is done after each city is z-normalized.",
         history=_history({-3: {"temperature_2m": 28.0}}),
-        reading=_reading(id=104, temperature_2m=28.0),
+        reading=_reading(id=104, temperature_2m=32.0),
         peers={
             "Ottawa": _reading(id=201, city="Ottawa", temperature_2m=20.0),
             "Vancouver": _reading(id=202, city="Vancouver", temperature_2m=15.0),

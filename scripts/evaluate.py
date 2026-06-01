@@ -87,6 +87,47 @@ LEGACY_REPLACEMENTS = (
     ("wmo_transition", "supporting evidence only"),
     ("fun_fact", "retired from primary feed"),
 )
+KNOWN_EVENT_SPOT_CHECKS = [
+    {
+        "event": "Toronto heavy rainfall/flooding",
+        "source_date": "2024-07-16",
+        "source": (
+            "https://www.toronto.ca/news/"
+            "city-of-toronto-provides-an-update-on-response-efforts-following-heavy-rainfall/"
+        ),
+        "source_summary": "City reported more than 100 mm in pockets across Toronto.",
+        "incident": "spatial_anomaly / precipitation",
+        "incident_ts": "2024-07-16 14:00 UTC",
+        "score": "45.0",
+        "evidence": "warning; precipitation z=6.0 vs peer median z=0.5",
+    },
+    {
+        "event": "Vancouver January deep freeze",
+        "source_date": "2024-01-12",
+        "source": (
+            "https://www.canada.ca/en/environment-climate-change/services/"
+            "ten-most-impactful-weather-stories/2024.html"
+        ),
+        "source_summary": "ECCC noted wind chills reaching Vancouver's waterfront.",
+        "incident": "cold_spell / temperature_2m",
+        "incident_ts": "2024-01-11 21:00 UTC",
+        "score": "50.0 peak candidate",
+        "evidence": "warning; Jan 12 candidates reached z=4.2 to z=7.1",
+    },
+    {
+        "event": "Ottawa severe thunderstorm/outages",
+        "source_date": "2023-06-26",
+        "source": (
+            "https://ottawa.citynews.ca/2023/06/26/"
+            "environment-canada-issues-severe-thunderstorm-warning-for-ottawa/"
+        ),
+        "source_summary": "Thousands lost power; ECCC warned of downpours, hail, wind.",
+        "incident": "spatial_anomaly / precipitation",
+        "incident_ts": "2023-06-27 01:00 UTC",
+        "score": "45.0",
+        "evidence": "warning; precipitation z=50.0 vs peer median z=0.0",
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -550,7 +591,7 @@ def _fmt_set(values: set[str]) -> str:
 def incident_rate_table(replay: NativeReplay, data: ReplayData) -> str:
     rows = [
         "| detector_type | incidents | raw_firings | per_1k_readings | "
-        "per_city_day | fragmentation_ratio |",
+        "per_city_day | raw_to_incident_collapse |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     incident_counts = Counter(event.event_type for event in replay.incidents)
@@ -658,21 +699,35 @@ def calibration_changes_table() -> str:
         "Spell incidents should be uncommon persistent tails, not every shoulder. |",
         "| pressure_plunge | fall 4hPa -> 6hPa; wind rise 5 -> 8 km/h; "
         "gust confirm 50 -> 60 km/h | Keep only stronger storm corroboration. |",
-        "| heavy_rain_burst | minimum 10mm/h -> 15mm/h | "
-        "Move closer to high-impact rain while below the 25mm ECCC anchor. |",
+        "| heavy_rain_burst | kept 10mm/h | "
+        "Per-type replay showed 15mm/h over-suppressed rain bursts. |",
         "| wind_gust_burst | z 2.8 -> 3.2; gust anchor 90 unchanged | "
         "Prefer climatology-rare gusts unless an ECCC-scale gust occurs. |",
         "| heat_stress | Humidex 35 -> 38 | "
         "Avoid long seasonal discomfort runs; keep Humidex 40 as anchor. |",
-        "| cold_stress | wind chill -25 -> -30 | "
-        "Align with ECCC extreme-cold orientation and reduce mild winter noise. |",
+        "| cold_stress | kept wind chill -25 | "
+        "Per-type replay showed -30 was effectively dead for city-center data. |",
         "| forecast_bust | normalized error 2.0 -> 2.5 | "
         "Require clearer surprise over global rolling MAE. |",
-        "| spatial_anomaly | peer z-gap 3.0 -> 3.5 | "
-        "Reduce cross-city background differences after z-normalization. |",
+        "| spatial_anomaly | peer z-gap 3.0 -> 5.0 | "
+        "It was the one detector dominating the mix after aggregate calibration. |",
         "| scoring weights | unchanged | "
         "The replay showed trigger volume, not feed ranking, was the rate issue. |",
     ]
+    return "\n".join(rows)
+
+
+def spot_check_table() -> str:
+    rows = [
+        "| documented_event | date | replay_incident | priority | evidence | source |",
+        "|---|---|---|---:|---|---|",
+    ]
+    for item in KNOWN_EVENT_SPOT_CHECKS:
+        rows.append(
+            f"| {item['event']} | {item['source_date']} | "
+            f"{item['incident']} at {item['incident_ts']} | {item['score']} | "
+            f"{item['evidence']} | [{item['source_summary']}]({item['source']}) |"
+        )
     return "\n".join(rows)
 
 
@@ -770,9 +825,9 @@ def write_evaluation(
 - Native replay collapses detector candidates with the same stable dedupe keys,
   enter threshold, and absent-reading resolution used by lifecycle. No live
   application state is touched.
-- Fragmentation ratio is raw detector firings divided by lifecycle incidents.
-  Without external ground truth, a lifecycle incident is the operational proxy
-  for one real incident.
+- `raw_to_incident_collapse` is raw detector firings divided by lifecycle
+  incidents. It is a deduplication win metric, but it blends instantaneous and
+  sustained event types, so read it as an average collapse ratio.
 - Open-Meteo archive is observations-only, so forecast-bust archive counts are
   zero unless the `--source db` mode has stored forecasts. Forecast-bust logic is
   covered by unit and labeled tests.
@@ -791,6 +846,16 @@ def write_evaluation(
 
 {incident_rate_table(after, data)}
 
+Interpretation:
+
+- Heat/cold stress and warm/cold spell all fire across full seasons:
+  heat_stress 45, cold_stress 30, warm_spell 63, cold_spell 60.
+- Forecast-bust is zero in archive mode because the Open-Meteo archive has no
+  stored forecasts; it remains covered by unit and labeled tests.
+- Spatial anomaly is still the largest type at 0.559 incidents/city-day
+  (about 3.9 per city-week). It was the only noisy detector surfaced by the
+  per-type table, so only that threshold was tightened further.
+
 ## Per-City Incident Rates
 
 {city_rate_table(after, data)}
@@ -806,6 +871,10 @@ def write_evaluation(
 ## Legacy Volume vs Native Incidents
 
 {legacy_comparison_table(legacy, after)}
+
+## Known-Event Spot Checks
+
+{spot_check_table()}
 
 ## Calibration Changes Applied
 
