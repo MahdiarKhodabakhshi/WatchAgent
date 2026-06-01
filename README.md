@@ -33,6 +33,9 @@ curl "http://localhost:8000/events?limit=5"
 Open-Meteo response, but the endpoints should respond without credentials. If port 8000 is
 already in use, set `HOST_PORT` in `.env` before starting Compose.
 
+The dashboard window control includes fixed 24-hour, 7-day, and 14-day views plus a custom
+1-60 day view. Custom windows are reflected in the URL as `?window=custom&days=30`.
+
 ### Recreate A Local Dev DB
 
 This repo does not use Alembic. Schema changes are additive in SQLAlchemy models, and a clean

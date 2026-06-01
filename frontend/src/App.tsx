@@ -37,17 +37,21 @@ export default function App() {
   const readingsQuery = useReadings({
     city: params.city,
     windowRange: params.windowRange,
+    customWindowDays: params.customWindowDays,
   });
   const crossCityReadingsQuery = useCrossCityReadings({
     windowRange: params.windowRange,
+    customWindowDays: params.customWindowDays,
   });
   const forecastsQuery = useForecasts({
     city: params.city,
     windowRange: params.windowRange,
+    customWindowDays: params.customWindowDays,
   });
   const eventsQuery = useEvents({
     city: params.city,
     windowRange: params.windowRange,
+    customWindowDays: params.customWindowDays,
     eventTypes: params.eventTypes,
     severities: params.severities,
   });
@@ -94,7 +98,9 @@ export default function App() {
         <TimeWindow
           windows={params.allWindows}
           value={params.windowRange}
+          customDays={params.customWindowDays}
           onChange={params.setWindowRange}
+          onCustomDaysChange={params.setCustomWindowDays}
         />
       </div>
 
@@ -134,6 +140,7 @@ export default function App() {
         isFetching={eventsQuery.isFetching}
         isError={eventsQuery.isError}
         windowRange={params.windowRange}
+        customWindowDays={params.customWindowDays}
         eventTypes={params.eventTypes}
         severities={params.severities}
         allEventTypes={params.allEventTypes}

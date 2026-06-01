@@ -1,4 +1,10 @@
-import type { DashboardCity, EventType, Severity, TimeWindow } from "../api/types";
+import {
+  DEFAULT_CUSTOM_WINDOW_DAYS,
+  type DashboardCity,
+  type EventType,
+  type Severity,
+  type TimeWindow,
+} from "../api/types";
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -86,7 +92,7 @@ export function cityLabel(value: DashboardCity): string {
   return value === "all" ? "All cities" : value;
 }
 
-export function windowLabel(value: TimeWindow): string {
+export function windowLabel(value: TimeWindow, customDays = DEFAULT_CUSTOM_WINDOW_DAYS): string {
   switch (value) {
     case "24h":
       return "24 hours";
@@ -94,6 +100,8 @@ export function windowLabel(value: TimeWindow): string {
       return "7 days";
     case "14d":
       return "14 days";
+    case "custom":
+      return `${customDays} days`;
   }
 }
 

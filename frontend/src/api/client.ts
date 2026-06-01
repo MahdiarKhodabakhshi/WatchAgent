@@ -6,7 +6,7 @@ import type {
   ReadingsResponse,
 } from "./types";
 
-const DEFAULT_LIMIT = 500;
+const DEFAULT_LIMIT = 5000;
 
 export class ApiError extends Error {
   constructor(

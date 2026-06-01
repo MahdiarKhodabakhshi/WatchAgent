@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  CUSTOM_WINDOW_MAX_DAYS,
+  CUSTOM_WINDOW_MIN_DAYS,
   CITIES,
+  DEFAULT_CUSTOM_WINDOW_DAYS,
   EVENT_TYPES,
   SEVERITIES,
   TIME_WINDOWS,
@@ -41,6 +44,18 @@ function allSelected<T extends string>(values: T[], allValues: readonly T[]): bo
   return values.length === allValues.length && allValues.every((value) => values.includes(value));
 }
 
+function normalizeCustomWindowDays(raw: string | number | null): number {
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_CUSTOM_WINDOW_DAYS;
+  }
+
+  return Math.min(
+    CUSTOM_WINDOW_MAX_DAYS,
+    Math.max(CUSTOM_WINDOW_MIN_DAYS, Math.round(parsed)),
+  );
+}
+
 function readInitialParams() {
   const search = new URLSearchParams(window.location.search);
   const rawCity = search.get("city");
@@ -49,6 +64,7 @@ function readInitialParams() {
   return {
     city: rawCity === "all" || (rawCity && isCity(rawCity)) ? (rawCity as DashboardCity) : "all",
     windowRange: rawWindow && isTimeWindow(rawWindow) ? rawWindow : "24h",
+    customWindowDays: normalizeCustomWindowDays(search.get("days")),
     eventTypes: parseList(search.get("types"), isEventType, EVENT_TYPES),
     severities: parseList(search.get("severities"), isSeverity, SEVERITIES),
   };
@@ -57,6 +73,7 @@ function readInitialParams() {
 function writeParams(
   city: DashboardCity,
   windowRange: TimeWindow,
+  customWindowDays: number,
   eventTypes: EventType[],
   severities: Severity[],
 ) {
@@ -67,6 +84,9 @@ function writeParams(
   }
   if (windowRange !== "24h") {
     search.set("window", windowRange);
+  }
+  if (windowRange === "custom") {
+    search.set("days", String(customWindowDays));
   }
   if (!allSelected(eventTypes, EVENT_TYPES)) {
     search.set("types", eventTypes.join(","));
@@ -84,12 +104,19 @@ export function useDashboardParams() {
   const initial = useMemo(readInitialParams, []);
   const [city, setCity] = useState<DashboardCity>(initial.city);
   const [windowRange, setWindowRange] = useState<TimeWindow>(initial.windowRange);
+  const [customWindowDays, setCustomWindowDaysRaw] = useState<number>(
+    initial.customWindowDays,
+  );
   const [eventTypes, setEventTypes] = useState<EventType[]>(initial.eventTypes);
   const [severities, setSeverities] = useState<Severity[]>(initial.severities);
 
   useEffect(() => {
-    writeParams(city, windowRange, eventTypes, severities);
-  }, [city, eventTypes, severities, windowRange]);
+    writeParams(city, windowRange, customWindowDays, eventTypes, severities);
+  }, [city, customWindowDays, eventTypes, severities, windowRange]);
+
+  const setCustomWindowDays = useCallback((days: number) => {
+    setCustomWindowDaysRaw(normalizeCustomWindowDays(days));
+  }, []);
 
   const toggleEventType = useCallback((eventType: EventType) => {
     setEventTypes((current) => {
@@ -115,10 +142,12 @@ export function useDashboardParams() {
   return {
     city,
     windowRange,
+    customWindowDays,
     eventTypes,
     severities,
     setCity,
     setWindowRange,
+    setCustomWindowDays,
     toggleEventType,
     toggleSeverity,
     resetEventFilters,

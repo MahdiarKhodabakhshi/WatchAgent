@@ -19,8 +19,11 @@ export const EVENT_TYPES = [
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
-export const TIME_WINDOWS = ["24h", "7d", "14d"] as const;
+export const TIME_WINDOWS = ["24h", "7d", "14d", "custom"] as const;
 export type TimeWindow = (typeof TIME_WINDOWS)[number];
+export const DEFAULT_CUSTOM_WINDOW_DAYS = 30;
+export const CUSTOM_WINDOW_MIN_DAYS = 1;
+export const CUSTOM_WINDOW_MAX_DAYS = 60;
 
 export interface Reading {
   id: number;

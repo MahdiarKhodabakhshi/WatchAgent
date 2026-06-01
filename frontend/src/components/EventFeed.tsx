@@ -11,6 +11,7 @@ interface EventFeedProps {
   isFetching: boolean;
   isError: boolean;
   windowRange: TimeWindow;
+  customWindowDays: number;
   eventTypes: EventType[];
   severities: Severity[];
   allEventTypes: readonly EventType[];
@@ -83,6 +84,7 @@ export function EventFeed({
   isFetching,
   isError,
   windowRange,
+  customWindowDays,
   eventTypes,
   severities,
   allEventTypes,
@@ -110,7 +112,9 @@ export function EventFeed({
           <div className="label mb-2">Event feed</div>
           <div className="text-sm text-text-muted">
             <span className="mono-num text-text">{events.length}</span> events in{" "}
-            <span className="mono-num text-text">{windowLabel(windowRange)}</span>
+            <span className="mono-num text-text">
+              {windowLabel(windowRange, customWindowDays)}
+            </span>
             {isFetching && !isLoading ? <span className="ml-2 text-text-faint">refreshing</span> : null}
           </div>
         </div>

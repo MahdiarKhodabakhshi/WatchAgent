@@ -154,7 +154,7 @@ def test_events_without_range_params_keep_existing_behavior(client, db_session: 
 
 
 def test_limit_validation(client) -> None:
-    response = client.get("/readings?limit=501")
+    response = client.get("/readings?limit=5001")
 
     assert response.status_code == 422
 
@@ -226,7 +226,7 @@ def test_forecasts_filtered_by_explicit_range(client, db_session: Session) -> No
 
 
 def test_forecasts_limit_validation(client) -> None:
-    response = client.get("/forecasts?limit=501")
+    response = client.get("/forecasts?limit=5001")
 
     assert response.status_code == 422
 

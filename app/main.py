@@ -21,6 +21,7 @@ from app.schemas import EventsResponse, ForecastsResponse, HealthResponse, Readi
 from app.storage import count_events, count_readings
 
 CityName = Literal["Ottawa", "Toronto", "Vancouver"]
+MAX_API_LIMIT = 5000
 
 
 @asynccontextmanager
@@ -69,7 +70,7 @@ def get_readings(
     city: Annotated[CityName | None, Query()] = None,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    limit: Annotated[int, Query(ge=1, le=MAX_API_LIMIT)] = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, list[Reading]]:
     start_utc = _utc_query_datetime(start, "start")
@@ -90,7 +91,7 @@ def get_events(
     city: Annotated[CityName | None, Query()] = None,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    limit: Annotated[int, Query(ge=1, le=MAX_API_LIMIT)] = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, list[Event]]:
     start_utc = _utc_query_datetime(start, "start")
@@ -114,7 +115,7 @@ def get_forecasts(
     city: Annotated[CityName | None, Query()] = None,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    limit: Annotated[int, Query(ge=1, le=MAX_API_LIMIT)] = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, list[Forecast]]:
     start_utc = _utc_query_datetime(start, "start")
