@@ -10,7 +10,7 @@ from app.detection.native_common import (
     make_candidate,
 )
 
-WIND_GUST_Z = 2.8
+WIND_GUST_Z = 3.2
 ECCC_GUST_KMH = 90.0
 
 

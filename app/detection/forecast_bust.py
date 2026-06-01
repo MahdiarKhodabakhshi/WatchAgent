@@ -6,7 +6,7 @@ from app.detection.base import DetectorContext, EventCandidate
 from app.detection.native_common import has_native_history, make_candidate
 from app.features import forecast_residual
 
-FORECAST_BUST_K = 2.0
+FORECAST_BUST_K = 2.5
 MIN_FORECAST_COMPARISONS = 3
 FORECAST_METRIC_FLOORS = {
     "temperature_2m": 1.0,

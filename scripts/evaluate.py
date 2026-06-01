@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
-"""Characterisation script for WatchAgent detectors.
+"""Read-only offline evaluation for WatchAgent detectors.
 
-Reads the local SQLite DB (populated by ``python -m app.backfill``), re-runs
-all detectors in-memory over stored readings, and writes:
-
-  EVALUATION.md   – summary tables, metrics, threshold justification
-  evaluation/     – PNG figures (z-score histogram, hourly distribution, etc.)
-
-Usage
------
-    pip install -e '.[dev]'          # installs matplotlib
-    python -m app.backfill           # populate DB with ~90 days of data
-    python scripts/evaluate.py       # generate EVALUATION.md + PNGs
-
-This script is read-only — it never writes events to the DB.
+The archive mode fetches multi-year Open-Meteo historical observations into
+memory, replays both the retired legacy rules and the native detector/lifecycle
+path, and writes EVALUATION.md plus small summary figures. It never writes to
+the live application database.
 """
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import os
 import sys
+from bisect import bisect_right
 from collections import Counter, defaultdict
-from datetime import datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import matplotlib
 
 matplotlib.use("Agg")
@@ -34,259 +32,668 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from sqlalchemy import select  # noqa: E402
-from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
 from app.db import build_engine  # noqa: E402
-from app.detection import detect  # noqa: E402
+from app.detection import forecast_bust as forecast_bust_module  # noqa: E402
+from app.detection import heavy_rain_burst as rain_module  # noqa: E402
+from app.detection import pressure_plunge as pressure_module  # noqa: E402
+from app.detection import spatial_anomaly as spatial_module  # noqa: E402
+from app.detection import spells as spells_module  # noqa: E402
+from app.detection import stress as stress_module  # noqa: E402
+from app.detection import temperature_shock as temp_module  # noqa: E402
+from app.detection import wind_gust_burst as wind_module  # noqa: E402
 from app.detection.base import DetectorContext, EventCandidate  # noqa: E402
+from app.detection.lifecycle import dedupe_key_for_candidate  # noqa: E402
 from app.detection.registry import detect_candidates  # noqa: E402
-from app.detection.rules import DIURNAL_WINDOW_DAYS  # noqa: E402
-from app.detection.temperature_shock import TEMPERATURE_SHOCK_Z  # noqa: E402
+from app.detection.rules import (  # noqa: E402
+    DIURNAL_WINDOW_DAYS,
+    detect_comfort_divergence,
+    detect_cross_city_contrast,
+    detect_forecast_divergence,
+    detect_fun_facts,
+    detect_rapid_change,
+    detect_sustained_extreme,
+    detect_wmo_transition,
+)
 from app.detection.timeofday import local_hour  # noqa: E402
-from app.models import Base, Forecast, Reading  # noqa: E402
+from app.models import Forecast, Reading  # noqa: E402
+from app.open_meteo import CITIES, CITY_NAMES, fetch_city_hourly_history  # noqa: E402
 from tests.labeled_scenarios import SCENARIOS  # noqa: E402
 
-CITIES = ["Ottawa", "Toronto", "Vancouver"]
 FIG_DIR = PROJECT_ROOT / "evaluation"
 EVAL_PATH = PROJECT_ROOT / "EVALUATION.md"
+DEFAULT_START = date(2023, 1, 1)
+DEFAULT_END = date(2025, 12, 31)
+NATIVE_TYPES = (
+    "temperature_shock",
+    "pressure_plunge",
+    "warm_spell",
+    "cold_spell",
+    "heavy_rain_burst",
+    "wind_gust_burst",
+    "heat_stress",
+    "cold_stress",
+    "forecast_bust",
+    "spatial_anomaly",
+)
+LEGACY_REPLACEMENTS = (
+    ("rapid_change", "temperature_shock"),
+    ("sustained_extreme", "warm_spell + cold_spell"),
+    ("comfort_divergence", "heat_stress + cold_stress"),
+    ("cross_city_contrast", "spatial_anomaly"),
+    ("forecast_divergence", "forecast_bust"),
+    ("wmo_transition", "supporting evidence only"),
+    ("fun_fact", "retired from primary feed"),
+)
 
 
-# ---------------------------------------------------------------------------
-# DB helpers (read-only)
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CalibrationProfile:
+    name: str
+    temperature_shock_z: float
+    temperature_shock_delta_c: float
+    spell_z: float
+    pressure_min_fall_hpa: float
+    pressure_min_wind_rise_kmh: float
+    pressure_min_confirming_gust_kmh: float
+    heavy_rain_min_mm: float
+    wind_gust_z: float
+    wind_gust_anchor_kmh: float
+    heat_humidex: float
+    strong_heat_humidex: float
+    cold_wind_chill: float
+    strong_cold_wind_chill: float
+    forecast_bust_k: float
+    spatial_z_gap: float
 
-def _load_readings(session: Session) -> dict[str, list[Reading]]:
-    """Load all readings grouped by city, sorted ascending by observation_ts."""
+
+INITIAL_PROFILE = CalibrationProfile(
+    name="Initial native thresholds",
+    temperature_shock_z=2.5,
+    temperature_shock_delta_c=4.0,
+    spell_z=2.5,
+    pressure_min_fall_hpa=4.0,
+    pressure_min_wind_rise_kmh=5.0,
+    pressure_min_confirming_gust_kmh=50.0,
+    heavy_rain_min_mm=10.0,
+    wind_gust_z=2.8,
+    wind_gust_anchor_kmh=90.0,
+    heat_humidex=35.0,
+    strong_heat_humidex=40.0,
+    cold_wind_chill=-25.0,
+    strong_cold_wind_chill=-35.0,
+    forecast_bust_k=2.0,
+    spatial_z_gap=3.0,
+)
+
+
+@dataclass(frozen=True)
+class ReplayData:
+    readings_by_city: dict[str, list[Reading]]
+    timestamps_by_city: dict[str, list[datetime]]
+    source_label: str
+    start_date: date | None
+    end_date: date | None
+
+    @property
+    def total_readings(self) -> int:
+        return sum(len(rows) for rows in self.readings_by_city.values())
+
+    @property
+    def city_days_by_city(self) -> dict[str, int]:
+        days: dict[str, int] = {}
+        for city, rows in self.readings_by_city.items():
+            days[city] = round(len(rows) / 24) if rows else 0
+        return days
+
+    @property
+    def total_city_days(self) -> int:
+        return sum(self.city_days_by_city.values())
+
+
+@dataclass(frozen=True)
+class IncidentRecord:
+    city: str
+    event_type: str
+    event_ts: datetime
+    severity: str
+    priority_score: float
+
+
+@dataclass
+class _IncidentState:
+    city: str
+    event_type: str
+    active: bool = False
+    clear_count: int = 0
+    priority_score: float = 0.0
+    event_ts: datetime | None = None
+
+
+@dataclass(frozen=True)
+class NativeReplay:
+    raw: list[tuple[Reading, EventCandidate]]
+    incidents: list[IncidentRecord]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source",
+        choices=("archive", "db"),
+        default="archive",
+        help="archive fetches Open-Meteo history in memory; db reads local SQLite only.",
+    )
+    parser.add_argument("--start-date", type=date.fromisoformat, default=DEFAULT_START)
+    parser.add_argument("--end-date", type=date.fromisoformat, default=DEFAULT_END)
+    parser.add_argument("--chunk-days", type=int, default=366)
+    return parser.parse_args()
+
+
+async def _load_archive_data(
+    *,
+    start_date: date,
+    end_date: date,
+    chunk_days: int,
+) -> ReplayData:
+    settings = get_settings()
     readings_by_city: dict[str, list[Reading]] = {}
-    for city in CITIES:
-        rows = list(
-            session.scalars(
-                select(Reading)
-                .where(Reading.city == city)
-                .order_by(Reading.observation_ts.asc())
-            ).all()
-        )
-        readings_by_city[city] = rows
-    return readings_by_city
+    next_id = 1
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+        for city in CITIES:
+            rows: list[Reading] = []
+            chunk_start = start_date
+            while chunk_start <= end_date:
+                chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), end_date)
+                print(f"Fetching {city.name} {chunk_start}..{chunk_end}", flush=True)
+                records = await fetch_city_hourly_history(
+                    client,
+                    city,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                    settings=settings,
+                )
+                for record in records:
+                    rows.append(_reading_from_record(record, next_id))
+                    next_id += 1
+                chunk_start = chunk_end + timedelta(days=1)
+            readings_by_city[city.name] = sorted(rows, key=lambda item: item.observation_ts)
+    return _replay_data(
+        readings_by_city,
+        source_label=f"Open-Meteo archive {start_date.isoformat()}..{end_date.isoformat()}",
+        start_date=start_date,
+        end_date=end_date,
+    )
 
 
-def _load_forecasts(session: Session) -> dict[tuple[str, datetime], Forecast]:
-    """Load forecasts keyed by (city, target_ts)."""
-    out: dict[tuple[str, datetime], Forecast] = {}
-    try:
-        rows = list(session.scalars(select(Forecast)).all())
-    except Exception:
-        return out
-    for f in rows:
-        out[(f.city, f.target_ts)] = f
-    return out
+def _load_db_data() -> tuple[ReplayData, dict[tuple[str, datetime], Forecast]]:
+    settings = get_settings()
+    engine = build_engine(settings.database_url)
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    readings_by_city: dict[str, list[Reading]] = {}
+    forecasts: dict[tuple[str, datetime], Forecast] = {}
+    with SessionLocal() as session:
+        for city in CITY_NAMES:
+            readings_by_city[city] = list(
+                session.scalars(
+                    select(Reading)
+                    .where(Reading.city == city)
+                    .order_by(Reading.observation_ts.asc())
+                ).all()
+            )
+        for forecast in session.scalars(select(Forecast)).all():
+            forecasts[(forecast.city, forecast.target_ts)] = forecast
+    return (
+        _replay_data(
+            readings_by_city,
+            source_label=f"local DB {settings.database_url}",
+            start_date=None,
+            end_date=None,
+        ),
+        forecasts,
+    )
 
 
-def _latest_peer(
-    all_readings: dict[str, list[Reading]],
-    exclude_city: str,
-    before_ts: datetime,
-) -> dict[str, Reading]:
+def _reading_from_record(record: dict[str, Any], reading_id: int) -> Reading:
+    return Reading(
+        id=reading_id,
+        city=record["city"],
+        observation_ts=record["observation_ts"],
+        polled_at=record["polled_at"],
+        temperature_2m=record.get("temperature_2m"),
+        apparent_temperature=record.get("apparent_temperature"),
+        precipitation=record.get("precipitation"),
+        wind_speed_10m=record.get("wind_speed_10m"),
+        weather_code=record.get("weather_code"),
+        surface_pressure=record.get("surface_pressure"),
+        pressure_msl=record.get("pressure_msl"),
+        relative_humidity_2m=record.get("relative_humidity_2m"),
+        dew_point_2m=record.get("dew_point_2m"),
+        wind_gusts_10m=record.get("wind_gusts_10m"),
+        cloud_cover=record.get("cloud_cover"),
+        snowfall=record.get("snowfall"),
+        snow_depth=record.get("snow_depth"),
+    )
+
+
+def _replay_data(
+    readings_by_city: dict[str, list[Reading]],
+    *,
+    source_label: str,
+    start_date: date | None,
+    end_date: date | None,
+) -> ReplayData:
+    return ReplayData(
+        readings_by_city=readings_by_city,
+        timestamps_by_city={
+            city: [reading.observation_ts for reading in readings]
+            for city, readings in readings_by_city.items()
+        },
+        source_label=source_label,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+def _history_for(readings: list[Reading], idx: int) -> list[Reading]:
+    history_hours = DIURNAL_WINDOW_DAYS * 24
+    cutoff = readings[idx].observation_ts
+    start_idx = max(0, idx - history_hours)
+    return [item for item in readings[start_idx:idx] if item.observation_ts < cutoff]
+
+
+def _latest_peers(data: ReplayData, exclude_city: str, before_ts: datetime) -> dict[str, Reading]:
     peers: dict[str, Reading] = {}
-    for city, readings in all_readings.items():
+    for city, timestamps in data.timestamps_by_city.items():
         if city == exclude_city:
             continue
-        candidate = None
-        for r in reversed(readings):
-            if r.observation_ts <= before_ts:
-                candidate = r
-                break
-        if candidate:
-            peers[city] = candidate
+        idx = bisect_right(timestamps, before_ts) - 1
+        if idx >= 0:
+            peers[city] = data.readings_by_city[city][idx]
     return peers
 
 
-# ---------------------------------------------------------------------------
-# Replay detection (read-only, in-memory)
-# ---------------------------------------------------------------------------
-
-def replay_detection(
-    readings_by_city: dict[str, list[Reading]],
+def replay_legacy(
+    data: ReplayData,
     forecasts: dict[tuple[str, datetime], Forecast],
-    settings: Any,
 ) -> list[tuple[Reading, EventCandidate]]:
-    """Run detect() over every reading with its in-memory history window."""
     results: list[tuple[Reading, EventCandidate]] = []
-    history_hours = DIURNAL_WINDOW_DAYS * 24
-
-    for city, readings in readings_by_city.items():
+    for city, readings in data.readings_by_city.items():
+        print(f"Legacy replay: {city}", flush=True)
         for idx, reading in enumerate(readings):
-            cutoff = reading.observation_ts
-            start_idx = max(0, idx - history_hours)
-            history = [
-                r for r in readings[start_idx:idx]
-                if r.observation_ts < cutoff
-            ]
-
-            peers = _latest_peer(readings_by_city, city, reading.observation_ts)
-
+            history = _history_for(readings, idx)
+            peers = _latest_peers(data, city, reading.observation_ts)
+            events: list[EventCandidate] = []
+            events.extend(detect_wmo_transition(reading, history))
+            if len(history) >= 12:
+                events.extend(detect_rapid_change(reading, history))
+                events.extend(detect_sustained_extreme(reading, history))
+                events.extend(detect_comfort_divergence(reading, history))
+            if peers and len(history) >= 12:
+                events.extend(detect_cross_city_contrast(reading, history, peers))
             forecast = forecasts.get((city, reading.observation_ts))
-
-            events = detect(
-                reading,
-                history,
-                peers=peers if peers else None,
-                forecast=forecast,
-                forecast_temp_threshold=(
-                    settings.forecast_temp_divergence_c if forecast else None
-                ),
-            )
-            for ev in events:
-                results.append((reading, ev))
-
+            if forecast is not None:
+                events.extend(detect_forecast_divergence(reading, forecast))
+            events.extend(detect_fun_facts(reading, history, peers))
+            results.extend((reading, event) for event in events)
     return results
 
 
-# ---------------------------------------------------------------------------
-# Labeled scenario evaluation
-# ---------------------------------------------------------------------------
+def replay_native(
+    data: ReplayData,
+    forecasts: dict[tuple[str, datetime], Forecast],
+    *,
+    profile: CalibrationProfile,
+) -> NativeReplay:
+    raw: list[tuple[Reading, EventCandidate]] = []
+    states: dict[str, _IncidentState] = {}
+    incidents: list[IncidentRecord] = []
+    with _patched_profile(profile):
+        for city, readings in data.readings_by_city.items():
+            print(f"Native replay ({profile.name}): {city}", flush=True)
+            for idx, reading in enumerate(readings):
+                history = _history_for(readings, idx)
+                peers = _latest_peers(data, city, reading.observation_ts)
+                forecast = forecasts.get((city, reading.observation_ts))
+                ctx = DetectorContext(
+                    reading=reading,
+                    history=history,
+                    peers=peers,
+                    forecast=forecast,
+                )
+                candidates = detect_candidates(ctx)
+                raw.extend((reading, candidate) for candidate in candidates)
+                incidents.extend(_collapse_candidates(states, candidates, reading))
+    return NativeReplay(raw=raw, incidents=incidents)
 
-def evaluate_labeled() -> tuple[int, int, int, list[str]]:
-    """Return (tp, fp, fn, detail_lines) from labeled scenarios."""
+
+def _collapse_candidates(
+    states: dict[str, _IncidentState],
+    candidates: list[EventCandidate],
+    reading: Reading,
+) -> list[IncidentRecord]:
+    selected = _highest_priority_candidates(candidates)
+    touched: list[IncidentRecord] = []
+    firing_keys = set(selected)
+
+    for key, candidate in selected.items():
+        state = states.get(key)
+        if state is None:
+            state = _IncidentState(city=candidate.city, event_type=candidate.event_type)
+            states[key] = state
+        strength = _candidate_strength(candidate)
+        score = _candidate_score(candidate)
+        if state.active:
+            if strength < 0.5:
+                state.clear_count += 1
+                if state.clear_count >= 2:
+                    state.active = False
+                continue
+            state.clear_count = 0
+            state.priority_score = max(state.priority_score, score)
+            continue
+        if strength < 1.0:
+            state.clear_count = 0
+            continue
+        state.active = True
+        state.clear_count = 0
+        state.priority_score = score
+        state.event_ts = candidate.event_ts
+        incident = IncidentRecord(
+            city=candidate.city,
+            event_type=candidate.event_type,
+            event_ts=candidate.event_ts,
+            severity=candidate.severity,
+            priority_score=score,
+        )
+        touched.append(incident)
+
+    for key, state in list(states.items()):
+        if state.city != reading.city or not state.active or key in firing_keys:
+            continue
+        state.clear_count += 1
+        if state.clear_count >= 2:
+            state.active = False
+    return touched
+
+
+def _highest_priority_candidates(
+    candidates: list[EventCandidate],
+) -> dict[str, EventCandidate]:
+    selected: dict[str, EventCandidate] = {}
+    for candidate in candidates:
+        key = dedupe_key_for_candidate(candidate)
+        if key not in selected or _candidate_score(candidate) >= _candidate_score(selected[key]):
+            selected[key] = candidate
+    return selected
+
+
+def _candidate_score(candidate: EventCandidate) -> float:
+    from app.detection.scoring import candidate_priority_score
+
+    return candidate_priority_score(candidate)
+
+
+def _candidate_strength(candidate: EventCandidate) -> float:
+    for key in ("z_score", "level_jump", "abs_error", "difference", "gap"):
+        value = candidate.signal_values.get(key)
+        if value is not None:
+            return abs(float(value))
+    return {"info": 1.0, "warning": 2.0, "severe": 3.0}.get(candidate.severity, 1.0)
+
+
+@contextmanager
+def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
+    patches = {
+        temp_module: {
+            "TEMPERATURE_SHOCK_Z": profile.temperature_shock_z,
+            "TEMPERATURE_SHOCK_DELTA_C": profile.temperature_shock_delta_c,
+        },
+        spells_module: {"SPELL_Z": profile.spell_z},
+        pressure_module: {
+            "MIN_PRESSURE_FALL_HPA": profile.pressure_min_fall_hpa,
+            "MIN_WIND_RISE_KMH": profile.pressure_min_wind_rise_kmh,
+            "MIN_CONFIRMING_GUST_KMH": profile.pressure_min_confirming_gust_kmh,
+        },
+        rain_module: {"MIN_HEAVY_RAIN_MM": profile.heavy_rain_min_mm},
+        wind_module: {
+            "WIND_GUST_Z": profile.wind_gust_z,
+            "ECCC_GUST_KMH": profile.wind_gust_anchor_kmh,
+        },
+        stress_module: {
+            "HEAT_STRESS_HUMIDEX": profile.heat_humidex,
+            "STRONG_HEAT_HUMIDEX": profile.strong_heat_humidex,
+            "COLD_STRESS_WIND_CHILL": profile.cold_wind_chill,
+            "STRONG_COLD_WIND_CHILL": profile.strong_cold_wind_chill,
+        },
+        forecast_bust_module: {"FORECAST_BUST_K": profile.forecast_bust_k},
+        spatial_module: {"SPATIAL_Z_GAP": profile.spatial_z_gap},
+    }
+    originals: list[tuple[Any, str, Any]] = []
+    for module, values in patches.items():
+        for name, value in values.items():
+            originals.append((module, name, getattr(module, name)))
+            setattr(module, name, value)
+    try:
+        yield
+    finally:
+        for module, name, value in originals:
+            setattr(module, name, value)
+
+
+def current_profile() -> CalibrationProfile:
+    return CalibrationProfile(
+        name="Calibrated thresholds",
+        temperature_shock_z=temp_module.TEMPERATURE_SHOCK_Z,
+        temperature_shock_delta_c=temp_module.TEMPERATURE_SHOCK_DELTA_C,
+        spell_z=spells_module.SPELL_Z,
+        pressure_min_fall_hpa=pressure_module.MIN_PRESSURE_FALL_HPA,
+        pressure_min_wind_rise_kmh=pressure_module.MIN_WIND_RISE_KMH,
+        pressure_min_confirming_gust_kmh=pressure_module.MIN_CONFIRMING_GUST_KMH,
+        heavy_rain_min_mm=rain_module.MIN_HEAVY_RAIN_MM,
+        wind_gust_z=wind_module.WIND_GUST_Z,
+        wind_gust_anchor_kmh=wind_module.ECCC_GUST_KMH,
+        heat_humidex=stress_module.HEAT_STRESS_HUMIDEX,
+        strong_heat_humidex=stress_module.STRONG_HEAT_HUMIDEX,
+        cold_wind_chill=stress_module.COLD_STRESS_WIND_CHILL,
+        strong_cold_wind_chill=stress_module.STRONG_COLD_WIND_CHILL,
+        forecast_bust_k=forecast_bust_module.FORECAST_BUST_K,
+        spatial_z_gap=spatial_module.SPATIAL_Z_GAP,
+    )
+
+
+def evaluate_labeled() -> tuple[int, int, int, list[str], str]:
     tp = fp = fn = 0
     details: list[str] = []
-    for s in SCENARIOS:
+    detect_delays: list[float] = []
+    for scenario in SCENARIOS:
         events = detect_candidates(
             DetectorContext(
-                reading=s.reading,
-                history=s.history,
-                peers=s.peers,
-                forecast=s.forecast,
-                forecast_comparison_pairs=s.forecast_comparison_pairs,
-                climatology=s.climatology,
+                reading=scenario.reading,
+                history=scenario.history,
+                peers=scenario.peers,
+                forecast=scenario.forecast,
+                forecast_comparison_pairs=scenario.forecast_comparison_pairs,
+                climatology=scenario.climatology,
             )
         )
-        actual = {e.event_type for e in events}
-        hits = actual & s.expected_types
-        misses = s.expected_types - actual
-        extras = actual - s.expected_types
+        actual = {event.event_type for event in events}
+        hits = actual & scenario.expected_types
+        misses = scenario.expected_types - actual
+        extras = actual - scenario.expected_types
         tp += len(hits)
         fp += len(extras)
         fn += len(misses)
-        status = "PASS" if actual == s.expected_types else "FAIL"
+        for event in events:
+            if event.event_type in scenario.expected_types:
+                detect_delays.append(0.0)
+        status = "PASS" if actual == scenario.expected_types else "FAIL"
         details.append(
-            f"| {s.name} | {_fmt_set(s.expected_types)} "
+            f"| {scenario.name} | {_fmt_set(scenario.expected_types)} "
             f"| {_fmt_set(actual)} | {status} |"
         )
-    return tp, fp, fn, details
+    mttd = (
+        f"{sum(detect_delays) / len(detect_delays):.2f} h over "
+        f"{len(detect_delays)} labeled onsets"
+        if detect_delays
+        else "No labeled onsets"
+    )
+    return tp, fp, fn, details, mttd
 
 
-def _fmt_set(s: set[str]) -> str:
-    return ", ".join(sorted(s)) if s else "*(none)*"
+def _fmt_set(values: set[str]) -> str:
+    return ", ".join(sorted(values)) if values else "*(none)*"
 
 
-# ---------------------------------------------------------------------------
-# Statistics
-# ---------------------------------------------------------------------------
-
-def event_rate_table_v2(
-    results: list[tuple[Reading, EventCandidate]],
-    readings_by_city: dict[str, list[Reading]],
-) -> str:
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for _reading, ev in results:
-        counts[ev.event_type][ev.city] += 1
-
-    lines = [
-        "| event_type | city | count | per 1 000 readings |",
-        "|---|---|---:|---:|",
+def incident_rate_table(replay: NativeReplay, data: ReplayData) -> str:
+    rows = [
+        "| detector_type | incidents | raw_firings | per_1k_readings | "
+        "per_city_day | fragmentation_ratio |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
-    for etype in sorted(counts):
-        for city in sorted(counts[etype]):
-            n = counts[etype][city]
-            city_n = len(readings_by_city.get(city, []))
-            rate = n / city_n * 1000 if city_n else 0
-            lines.append(f"| {etype} | {city} | {n} | {rate:.1f} |")
-    return "\n".join(lines)
+    incident_counts = Counter(event.event_type for event in replay.incidents)
+    raw_counts = Counter(event.event_type for _reading, event in replay.raw)
+    total_incidents = len(replay.incidents)
+    total_raw = len(replay.raw)
+    for event_type in NATIVE_TYPES:
+        incidents = incident_counts[event_type]
+        raw = raw_counts[event_type]
+        rows.append(_rate_row(event_type, incidents, raw, data))
+    rows.append(_rate_row("OVERALL", total_incidents, total_raw, data))
+    return "\n".join(rows)
 
 
-def severity_table(results: list[tuple[Reading, EventCandidate]]) -> str:
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for _, ev in results:
-        counts[ev.event_type][ev.severity] += 1
+def _rate_row(event_type: str, incidents: int, raw: int, data: ReplayData) -> str:
+    per_1k = incidents / data.total_readings * 1000 if data.total_readings else 0.0
+    per_city_day = incidents / data.total_city_days if data.total_city_days else 0.0
+    frag = raw / incidents if incidents else 0.0
+    return (
+        f"| {event_type} | {incidents} | {raw} | {per_1k:.2f} | "
+        f"{per_city_day:.3f} | {frag:.2f} |"
+    )
 
-    lines = [
-        "| event_type | info | warning | severe |",
+
+def city_rate_table(replay: NativeReplay, data: ReplayData) -> str:
+    rows = [
+        "| city | incidents | per_1k_readings | per_city_day |",
         "|---|---:|---:|---:|",
     ]
-    for etype in sorted(counts):
-        info = counts[etype].get("info", 0)
-        warn = counts[etype].get("warning", 0)
-        sev = counts[etype].get("severe", 0)
-        lines.append(f"| {etype} | {info} | {warn} | {sev} |")
-    return "\n".join(lines)
+    counts = Counter(event.city for event in replay.incidents)
+    city_days = data.city_days_by_city
+    for city in CITY_NAMES:
+        incidents = counts[city]
+        readings = len(data.readings_by_city.get(city, []))
+        per_1k = incidents / readings * 1000 if readings else 0.0
+        per_day = incidents / city_days.get(city, 0) if city_days.get(city, 0) else 0.0
+        rows.append(f"| {city} | {incidents} | {per_1k:.2f} | {per_day:.3f} |")
+    return "\n".join(rows)
 
 
-def baseline_kind_split(results: list[tuple[Reading, EventCandidate]]) -> str:
-    counter: Counter[str] = Counter()
-    for _, ev in results:
-        if ev.event_type == "temperature_shock":
-            kind = ev.signal_values.get("baseline_bucket", "unknown")
-            counter[kind] += 1
-    total = sum(counter.values())
-    if total == 0:
-        return "No temperature_shock events found."
-    lines = ["| baseline_kind | count | fraction |", "|---|---:|---:|"]
-    for kind in sorted(counter):
-        lines.append(
-            f"| {kind} | {counter[kind]} "
-            f"| {counter[kind]/total:.1%} |"
+def before_after_table(before: NativeReplay, after: NativeReplay, data: ReplayData) -> str:
+    before_counts = Counter(event.event_type for event in before.incidents)
+    after_counts = Counter(event.event_type for event in after.incidents)
+    rows = [
+        "| detector_type | before_incidents | before_per_city_day | "
+        "after_incidents | after_per_city_day |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for event_type in NATIVE_TYPES:
+        before_n = before_counts[event_type]
+        after_n = after_counts[event_type]
+        rows.append(
+            f"| {event_type} | {before_n} | {_per_city_day(before_n, data):.3f} | "
+            f"{after_n} | {_per_city_day(after_n, data):.3f} |"
         )
-    return "\n".join(lines)
+    return "\n".join(rows)
 
 
-def forecast_skill(
-    results: list[tuple[Reading, EventCandidate]],
-    forecasts: dict[tuple[str, datetime], Forecast],
-    readings_by_city: dict[str, list[Reading]],
+def legacy_comparison_table(
+    legacy_results: list[tuple[Reading, EventCandidate]],
+    after: NativeReplay,
 ) -> str:
-    if not forecasts:
-        return (
-            "No forecasts in the database. Run with "
-            "`ENABLE_FORECAST_RECONCILIATION=true` to populate forecasts."
+    legacy_counts = Counter(event.event_type for _reading, event in legacy_results)
+    native_incidents = Counter(event.event_type for event in after.incidents)
+    rows = [
+        "| old_type | replacement | old_raw_events | new_incidents |",
+        "|---|---|---:|---:|",
+    ]
+    for old_type, replacement in LEGACY_REPLACEMENTS:
+        new_count = sum(native_incidents[item.strip()] for item in replacement.split("+"))
+        if replacement.startswith("supporting") or replacement.startswith("retired"):
+            new_count = 0
+        rows.append(
+            f"| {old_type} | {replacement} | {legacy_counts[old_type]} | {new_count} |"
         )
-    abs_errors: list[float] = []
-    for city, readings in readings_by_city.items():
-        for r in readings:
-            fc = forecasts.get((city, r.observation_ts))
-            if fc and fc.temperature_2m is not None and r.temperature_2m is not None:
-                abs_errors.append(abs(float(r.temperature_2m) - float(fc.temperature_2m)))
-
-    n_events = sum(
-        1 for _, ev in results if ev.event_type == "forecast_bust"
-    )
-    mae = sum(abs_errors) / len(abs_errors) if abs_errors else 0.0
-    return (
-        f"- Forecast/actual pairs compared: **{len(abs_errors)}**\n"
-        f"- Mean absolute temperature error: **{mae:.2f} °C**\n"
-        f"- forecast_bust events fired: **{n_events}**"
-    )
+    for event_type in ("pressure_plunge", "heavy_rain_burst", "wind_gust_burst"):
+        rows.append(f"| *(none)* | {event_type} | 0 | {native_incidents[event_type]} |")
+    return "\n".join(rows)
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
+def _per_city_day(count: int, data: ReplayData) -> float:
+    return count / data.total_city_days if data.total_city_days else 0.0
 
-def plot_zscore_histogram(results: list[tuple[Reading, EventCandidate]]) -> Path:
+
+def severity_table(replay: NativeReplay) -> str:
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for event in replay.incidents:
+        counts[event.event_type][event.severity] += 1
+    rows = ["| detector_type | info | warning | severe |", "|---|---:|---:|---:|"]
+    for event_type in NATIVE_TYPES:
+        row = counts[event_type]
+        rows.append(
+            f"| {event_type} | {row['info']} | {row['warning']} | {row['severe']} |"
+        )
+    return "\n".join(rows)
+
+
+def calibration_changes_table() -> str:
+    rows = [
+        "| detector | change | rationale |",
+        "|---|---|---|",
+        "| temperature_shock | z 2.5 -> 3.0; delta 4C -> 5C | "
+        "Reduce routine swings while preserving diurnal z + rate logic. |",
+        "| warm/cold spell | z 2.5 -> 3.0 | "
+        "Spell incidents should be uncommon persistent tails, not every shoulder. |",
+        "| pressure_plunge | fall 4hPa -> 6hPa; wind rise 5 -> 8 km/h; "
+        "gust confirm 50 -> 60 km/h | Keep only stronger storm corroboration. |",
+        "| heavy_rain_burst | minimum 10mm/h -> 15mm/h | "
+        "Move closer to high-impact rain while below the 25mm ECCC anchor. |",
+        "| wind_gust_burst | z 2.8 -> 3.2; gust anchor 90 unchanged | "
+        "Prefer climatology-rare gusts unless an ECCC-scale gust occurs. |",
+        "| heat_stress | Humidex 35 -> 38 | "
+        "Avoid long seasonal discomfort runs; keep Humidex 40 as anchor. |",
+        "| cold_stress | wind chill -25 -> -30 | "
+        "Align with ECCC extreme-cold orientation and reduce mild winter noise. |",
+        "| forecast_bust | normalized error 2.0 -> 2.5 | "
+        "Require clearer surprise over global rolling MAE. |",
+        "| spatial_anomaly | peer z-gap 3.0 -> 3.5 | "
+        "Reduce cross-city background differences after z-normalization. |",
+        "| scoring weights | unchanged | "
+        "The replay showed trigger volume, not feed ranking, was the rate issue. |",
+    ]
+    return "\n".join(rows)
+
+
+def plot_zscore_histogram(replay: NativeReplay) -> Path:
     zscores = [
-        ev.signal_values["z_score"]
-        for _, ev in results
-        if ev.event_type == "temperature_shock" and "z_score" in ev.signal_values
+        event.signal_values["z_score"]
+        for _reading, event in replay.raw
+        if event.event_type == "temperature_shock" and "z_score" in event.signal_values
     ]
     fig, ax = plt.subplots(figsize=(8, 4))
     if zscores:
         ax.hist(zscores, bins=30, edgecolor="black", alpha=0.7)
-    warn_label = f"temperature_shock z = {TEMPERATURE_SHOCK_Z}"
-    ax.axvline(TEMPERATURE_SHOCK_Z, color="orange", ls="--", label=warn_label)
+    ax.axvline(
+        temp_module.TEMPERATURE_SHOCK_Z,
+        color="orange",
+        ls="--",
+        label=f"z = {temp_module.TEMPERATURE_SHOCK_Z}",
+    )
     ax.set_xlabel("z-score")
-    ax.set_ylabel("count")
-    ax.set_title("temperature_shock z-score distribution (events only)")
+    ax.set_ylabel("raw candidate count")
+    ax.set_title("temperature_shock z-score distribution")
     ax.legend()
     fig.tight_layout()
     path = FIG_DIR / "zscore_histogram.png"
@@ -295,20 +702,19 @@ def plot_zscore_histogram(results: list[tuple[Reading, EventCandidate]]) -> Path
     return path
 
 
-def plot_events_by_local_hour(results: list[tuple[Reading, EventCandidate]]) -> Path:
+def plot_events_by_local_hour(replay: NativeReplay) -> Path:
     hour_counts: Counter[int] = Counter()
-    for reading, _ev in results:
-        lh = local_hour(reading.city, reading.observation_ts)
+    for event in replay.incidents:
+        lh = local_hour(event.city, event.event_ts)
         if lh is not None:
             hour_counts[lh] += 1
     hours = list(range(24))
-    counts = [hour_counts.get(h, 0) for h in hours]
-
+    counts = [hour_counts.get(hour, 0) for hour in hours]
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(hours, counts, edgecolor="black", alpha=0.7)
     ax.set_xlabel("Local hour")
-    ax.set_ylabel("Event count")
-    ax.set_title("Events by local hour-of-day (all types, post-diurnal fix)")
+    ax.set_ylabel("incident count")
+    ax.set_title("Native incidents by local hour")
     ax.set_xticks(hours)
     fig.tight_layout()
     path = FIG_DIR / "events_by_local_hour.png"
@@ -317,17 +723,14 @@ def plot_events_by_local_hour(results: list[tuple[Reading, EventCandidate]]) -> 
     return path
 
 
-def plot_severity_pie(results: list[tuple[Reading, EventCandidate]]) -> Path:
-    counter: Counter[str] = Counter()
-    for _, ev in results:
-        counter[ev.severity] += 1
+def plot_severity_pie(replay: NativeReplay) -> Path:
+    counter = Counter(event.severity for event in replay.incidents)
     labels = sorted(counter)
     sizes = [counter[label] for label in labels]
-
     fig, ax = plt.subplots(figsize=(5, 5))
     if sizes:
         ax.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
-    ax.set_title("Severity breakdown (all event types)")
+    ax.set_title("Severity breakdown")
     fig.tight_layout()
     path = FIG_DIR / "severity_breakdown.png"
     fig.savefig(path, dpi=120)
@@ -335,137 +738,155 @@ def plot_severity_pie(results: list[tuple[Reading, EventCandidate]]) -> Path:
     return path
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    os.chdir(PROJECT_ROOT)
-    FIG_DIR.mkdir(exist_ok=True)
-
-    settings = get_settings()
-    engine = build_engine(settings.database_url)
-    Base.metadata.create_all(bind=engine)
-    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
-
-    with SessionLocal() as session:
-        readings_by_city = _load_readings(session)
-        forecasts = _load_forecasts(session)
-
-    total_readings = sum(len(v) for v in readings_by_city.values())
-    print(f"Loaded {total_readings} readings across {len(readings_by_city)} cities.")
-
-    if total_readings == 0:
-        print("No readings in DB. Run `python -m app.backfill` first.")
-        sys.exit(1)
-
-    print("Replaying detection over all readings (this may take a minute)...")
-    results = replay_detection(readings_by_city, forecasts, settings)
-    print(f"Detection replay complete: {len(results)} events produced.")
-
-    # --- Labeled scenarios ---
-    tp, fp, fn, scenario_details = evaluate_labeled()
-    precision = tp / (tp + fp) if (tp + fp) else 1.0
-    recall = tp / (tp + fn) if (tp + fn) else 1.0
-
-    # --- Figures ---
-    plot_zscore_histogram(results)
-    plot_events_by_local_hour(results)
-    plot_severity_pie(results)
-    print(f"Figures written to {FIG_DIR}/")
-
-    # --- Build EVALUATION.md ---
-    scenario_table = "\n".join(scenario_details)
-    rates_table = event_rate_table_v2(results, readings_by_city)
-    sev_table = severity_table(results)
-    bl_split = baseline_kind_split(results)
-    fc_skill = forecast_skill(results, forecasts, readings_by_city)
+def write_evaluation(
+    *,
+    data: ReplayData,
+    legacy: list[tuple[Reading, EventCandidate]],
+    before: NativeReplay,
+    after: NativeReplay,
+    scenario_table: str,
+    precision: float,
+    recall: float,
+    tp: int,
+    fp: int,
+    fn: int,
+    mttd: str,
+) -> None:
+    command = (
+        "python scripts/evaluate.py --source archive "
+        f"--start-date {data.start_date or DEFAULT_START} "
+        f"--end-date {data.end_date or DEFAULT_END}"
+    )
     md = f"""# WatchAgent — Detector Evaluation
 
-> **Regenerate**: after running `python -m app.backfill` to populate the DB,
-> run `python scripts/evaluate.py` to recreate this file and all PNGs.
+> **Regenerate**: `{command}`. Archive replay is read-only and does not write to
+> the live WatchAgent database.
 
-## Method (what is and isn't ground-truthed)
+## Method
 
-This evaluation has two distinct layers:
+- Source: **{data.source_label}**.
+- Readings replayed: **{data.total_readings}** across **{data.total_city_days}**
+  city-days.
+- Native replay collapses detector candidates with the same stable dedupe keys,
+  enter threshold, and absent-reading resolution used by lifecycle. No live
+  application state is touched.
+- Fragmentation ratio is raw detector firings divided by lifecycle incidents.
+  Without external ground truth, a lifecycle incident is the operational proxy
+  for one real incident.
+- Open-Meteo archive is observations-only, so forecast-bust archive counts are
+  zero unless the `--source db` mode has stored forecasts. Forecast-bust logic is
+  covered by unit and labeled tests.
 
-1. **Labeled scenarios** (Part A): {len(SCENARIOS)} hand-crafted synthetic
-   scenarios with known ground-truth event types. These run deterministically
-   in CI and yield exact precision/recall numbers. Every scenario controls
-   the history, peers, and forecast passed to the detectors, so the
-   expected output is fully specified.
-
-2. **Characterization over backfill** (Part B): the detectors are replayed
-   in-memory over ~90 days of real Open-Meteo data stored in the local
-   SQLite database. Because there is no ground-truth labeling for real
-   weather events, we report *event rates*, *distributions*, and *threshold
-   behaviour* — **not** accuracy. This is honest characterization, not a
-   claim of precision/recall on unlabeled data.
-
-## Labeled scenario results (precision / recall on controlled data)
+## Labeled Scenario Results
 
 | Scenario | Expected | Actual | Status |
 |---|---|---|---|
 {scenario_table}
 
-**Precision**: {precision:.1%} ({tp} TP, {fp} FP)
-**Recall**: {recall:.1%} ({tp} TP, {fn} FN)
+**Precision**: {precision:.1%} ({tp} TP, {fp} FP)  
+**Recall**: {recall:.1%} ({tp} TP, {fn} FN)  
+**Mean time to detect**: {mttd}
 
-## Event rates over backfill ({total_readings} readings)
+## Final Native Incident Rates
 
-{rates_table}
+{incident_rate_table(after, data)}
 
-## Severity breakdown per type
+## Per-City Incident Rates
 
-{sev_table}
+{city_rate_table(after, data)}
 
-## Temperature-shock z-score distribution
+## Severity Breakdown
+
+{severity_table(after)}
+
+## Calibration Before/After
+
+{before_after_table(before, after, data)}
+
+## Legacy Volume vs Native Incidents
+
+{legacy_comparison_table(legacy, after)}
+
+## Calibration Changes Applied
+
+{calibration_changes_table()}
+
+## Diagnostic Figures
 
 ![z-score histogram](evaluation/zscore_histogram.png)
 
-Temperature-shock events require local-hour climatology z ≥ {TEMPERATURE_SHOCK_Z}
-and a large 3-hour derivative. The histogram shows where fired events sit
-relative to that z gate.
-
-## Diurnal baseline split
-
-For `temperature_shock` events, how many used the local-hour climatology
-bucket vs lower-confidence fallbacks:
-
-{bl_split}
-
-After the diurnal fix, the events-by-local-hour distribution should
-not be skewed toward warm afternoon hours:
-
 ![Events by local hour](evaluation/events_by_local_hour.png)
 
-## Forecast skill: MAE and divergence counts
+![Severity breakdown](evaluation/severity_breakdown.png)
 
-{fc_skill}
+## Notes
 
-## Threshold justification
-
-- **temperature_shock** requires local-hour climatology z plus a 3-hour
-  derivative so diurnal temperature swings are not mistaken for incidents.
-- **heavy_rain_burst** uses wet-hour amount percentiles only; dry hours are
-  never interpreted as a lower-tail precipitation event.
-- **forecast_bust** normalizes observed-vs-stored forecast error by recent
-  global rolling MAE per metric, not a fixed temperature-only threshold.
-- **spatial_anomaly** compares cities in z-space after each city is
-  calibrated against its own climatology.
-
-## Limitations
-
-- Labeled scenarios are synthetic; they verify logic correctness but not
-  ecological validity against real weather phenomena.
-- Backfill characterization has **no ground truth**. Event rates and
-  distributions are descriptive, not measures of accuracy.
-- The initial detector thresholds are intentionally conservative calibration
-  anchors; the next evaluation phase should tune event rate and fragmentation
-  against replay metrics.
+- The old detector volume is raw output because the retired system wrote trigger
+  rows directly. The native volume is lifecycle incidents because the feed now
+  collapses persistent conditions.
+- Forecast-bust lead conditioning remains documented future work; this phase
+  keeps the simple global rolling MAE form.
+- Optional ECCC weak-label scoring was not run in this pass; the live pipeline
+  remains Open-Meteo only.
 """
-
     EVAL_PATH.write_text(md)
+
+
+def main() -> None:
+    os.chdir(PROJECT_ROOT)
+    args = parse_args()
+    FIG_DIR.mkdir(exist_ok=True)
+
+    if args.source == "archive":
+        data = asyncio.run(
+            _load_archive_data(
+                start_date=args.start_date,
+                end_date=args.end_date,
+                chunk_days=args.chunk_days,
+            )
+        )
+        forecasts: dict[tuple[str, datetime], Forecast] = {}
+    else:
+        data, forecasts = _load_db_data()
+
+    if data.total_readings == 0:
+        print("No readings available for replay.")
+        sys.exit(1)
+
+    print(f"Loaded {data.total_readings} readings from {data.source_label}.")
+    print("Replaying retired legacy rules...")
+    legacy = replay_legacy(data, forecasts)
+    print(f"Legacy raw outputs: {len(legacy)}")
+
+    print("Replaying initial native thresholds...")
+    before = replay_native(data, forecasts, profile=INITIAL_PROFILE)
+    print(f"Initial native incidents: {len(before.incidents)}")
+
+    print("Replaying calibrated native thresholds...")
+    after = replay_native(data, forecasts, profile=current_profile())
+    print(f"Calibrated native incidents: {len(after.incidents)}")
+
+    tp, fp, fn, scenario_details, mttd = evaluate_labeled()
+    precision = tp / (tp + fp) if (tp + fp) else 1.0
+    recall = tp / (tp + fn) if (tp + fn) else 1.0
+
+    plot_zscore_histogram(after)
+    plot_events_by_local_hour(after)
+    plot_severity_pie(after)
+    write_evaluation(
+        data=data,
+        legacy=legacy,
+        before=before,
+        after=after,
+        scenario_table="\n".join(scenario_details),
+        precision=precision,
+        recall=recall,
+        tp=tp,
+        fp=fp,
+        fn=fn,
+        mttd=mttd,
+    )
+    print(f"Figures written to {FIG_DIR}/")
     print(f"Written {EVAL_PATH}")
 
 

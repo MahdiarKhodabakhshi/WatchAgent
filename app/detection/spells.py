@@ -10,7 +10,7 @@ from app.detection.native_common import (
     make_candidate,
 )
 
-SPELL_Z = 2.5
+SPELL_Z = 3.0
 
 
 @dataclass(frozen=True)

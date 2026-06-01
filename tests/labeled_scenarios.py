@@ -142,7 +142,7 @@ SCENARIOS: list[Scenario] = [
         name="heavy_rain_wet_hour_only",
         description="Wet-hour amount exceeds local wet-hour p95 and absolute floor.",
         history=_history(),
-        reading=_reading(id=101, precipitation=12.0),
+        reading=_reading(id=101, precipitation=18.0),
         expected_types={"heavy_rain_burst"},
     ),
     Scenario(

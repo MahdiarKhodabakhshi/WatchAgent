@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -14,9 +15,9 @@ from app.detection.native_common import (
 from app.features import k_hour_delta, percentile
 
 PRESSURE_PLUNGE_HOURS = 3
-MIN_PRESSURE_FALL_HPA = 4.0
-MIN_WIND_RISE_KMH = 5.0
-MIN_CONFIRMING_GUST_KMH = 50.0
+MIN_PRESSURE_FALL_HPA = 6.0
+MIN_WIND_RISE_KMH = 8.0
+MIN_CONFIRMING_GUST_KMH = 60.0
 
 
 @dataclass(frozen=True)
@@ -108,19 +109,23 @@ def _historical_deltas(history: list[Any], metric: str, hours: int) -> list[floa
         [item for item in history if getattr(item, "observation_ts", None) is not None],
         key=lambda item: item.observation_ts,
     )
+    timestamps = [item.observation_ts for item in ordered]
     deltas: list[float] = []
     for idx, item in enumerate(ordered):
         current_value = numeric_attr(item, metric)
         if current_value is None:
             continue
         target_ts = item.observation_ts - timedelta(hours=hours)
+        insert_at = bisect_left(timestamps, target_ts, 0, idx)
+        candidates = [
+            ordered[position]
+            for position in (insert_at - 1, insert_at)
+            if 0 <= position < idx
+            and numeric_attr(ordered[position], metric) is not None
+            and abs(ordered[position].observation_ts - target_ts) <= timedelta(minutes=45)
+        ]
         previous = min(
-            (
-                candidate
-                for candidate in ordered[:idx]
-                if numeric_attr(candidate, metric) is not None
-                and abs(candidate.observation_ts - target_ts) <= timedelta(minutes=45)
-            ),
+            candidates,
             key=lambda candidate: abs((candidate.observation_ts - target_ts).total_seconds()),
             default=None,
         )

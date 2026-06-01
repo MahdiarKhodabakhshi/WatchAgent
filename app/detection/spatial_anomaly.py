@@ -11,7 +11,7 @@ from app.detection.native_common import (
 )
 from app.features import median, peer_z_values
 
-SPATIAL_Z_GAP = 3.0
+SPATIAL_Z_GAP = 3.5
 SPATIAL_METRICS = ("temperature_2m", "wind_gusts_10m", "pressure_msl", "precipitation")
 
 

@@ -10,7 +10,7 @@ from app.detection.native_common import (
     make_candidate,
 )
 
-MIN_HEAVY_RAIN_MM = 10.0
+MIN_HEAVY_RAIN_MM = 15.0
 ECCC_ONE_HOUR_RAIN_MM = 25.0
 
 

@@ -11,8 +11,8 @@ from app.detection.native_common import (
 )
 from app.features import k_hour_delta
 
-TEMPERATURE_SHOCK_Z = 2.5
-TEMPERATURE_SHOCK_DELTA_C = 4.0
+TEMPERATURE_SHOCK_Z = 3.0
+TEMPERATURE_SHOCK_DELTA_C = 5.0
 TEMPERATURE_SHOCK_HOURS = 3
 
 

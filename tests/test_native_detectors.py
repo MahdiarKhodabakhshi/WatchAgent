@@ -125,19 +125,19 @@ def test_pressure_plunge_cold_start_does_not_fire() -> None:
 
 def test_heavy_rain_burst_fires_on_wet_hour_amount() -> None:
     detector = HeavyRainBurstDetector()
-    current = _reading(id=100, precipitation=12.0)
+    current = _reading(id=100, precipitation=18.0)
 
     events = detector.detect(_ctx(current, _history()))
 
     assert len(events) == 1
     assert events[0].event_type == "heavy_rain_burst"
-    assert events[0].signal_values["amount_mm"] == 12.0
-    assert events[0].signal_values["threshold_mm"] == 10.0
+    assert events[0].signal_values["amount_mm"] == 18.0
+    assert events[0].signal_values["threshold_mm"] == 15.0
 
 
 def test_heavy_rain_burst_near_miss_does_not_fire() -> None:
     detector = HeavyRainBurstDetector()
-    current = _reading(id=100, precipitation=8.0)
+    current = _reading(id=100, precipitation=12.0)
 
     assert detector.detect(_ctx(current, _history())) == []
 

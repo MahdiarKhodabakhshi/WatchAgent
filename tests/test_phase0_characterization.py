@@ -114,7 +114,7 @@ def test_phase0_pure_detection_outputs_for_fixed_sequence() -> None:
     current = _reading(
         id=100,
         temperature_2m=28.0,
-        precipitation=12.0,
+        precipitation=18.0,
         pressure_msl=1000.0,
         wind_gusts_10m=55.0,
     )
@@ -122,7 +122,7 @@ def test_phase0_pure_detection_outputs_for_fixed_sequence() -> None:
         id=200,
         city="Toronto",
         temperature_2m=20.0,
-        precipitation=12.0,
+        precipitation=18.0,
         pressure_msl=1000.0,
         wind_gusts_10m=55.0,
     )
