@@ -45,7 +45,7 @@ def test_lifecycle_hysteresis_prevents_flapping(db_session: Session) -> None:
     events = _events(db_session)
     assert len(events) == 1
     assert events[0].status == "ongoing"
-    assert events[0].dedupe_key == "Toronto|rapid_change|temperature_2m"
+    assert events[0].dedupe_key == "Toronto|temperature_shock|temperature_2m"
 
 
 def test_lifecycle_peak_ts_tracks_middle_peak(db_session: Session) -> None:
@@ -117,8 +117,8 @@ def test_lifecycle_concurrent_incidents_resolve_independently(db_session: Sessio
             _candidate(
                 _reading(0, id=2),
                 z=4.0,
-                event_type="sustained_extreme",
-                metric="wind_speed_10m",
+                event_type="wind_gust_burst",
+                metric="wind_gusts_10m",
             ),
         ],
         observed_reading=_reading(0),
@@ -138,10 +138,10 @@ def test_lifecycle_concurrent_incidents_resolve_independently(db_session: Sessio
 
     events = sorted(_events(db_session), key=lambda event: event.event_type)
     assert len(events) == 2
-    assert events[0].event_type == "rapid_change"
+    assert events[0].event_type == "temperature_shock"
     assert events[0].status == "resolved"
     assert events[0].resolved_ts == _reading(4).observation_ts
-    assert events[1].event_type == "sustained_extreme"
+    assert events[1].event_type == "wind_gust_burst"
     assert events[1].status == "resolved"
     assert events[1].resolved_ts == _reading(2).observation_ts
 
@@ -155,8 +155,8 @@ def test_lifecycle_cold_start_without_candidates_opens_no_incident(db_session: S
 
 
 def test_events_endpoint_sorts_by_priority_score(client, db_session: Session) -> None:
-    low = _event_row(_reading(0), priority_score=20.0, event_type="fun_fact")
-    high = _event_row(_reading(1), priority_score=70.0, event_type="rapid_change")
+    low = _event_row(_reading(0), priority_score=20.0, event_type="heavy_rain_burst")
+    high = _event_row(_reading(1), priority_score=70.0, event_type="temperature_shock")
     db_session.add_all([low, high])
     db_session.commit()
 
@@ -165,14 +165,17 @@ def test_events_endpoint_sorts_by_priority_score(client, db_session: Session) ->
     assert response.status_code == 200
     events = response.json()["events"]
     assert [event["priority_score"] for event in events] == [70.0, 20.0]
-    assert [event["event_type"] for event in events] == ["rapid_change", "fun_fact"]
+    assert [event["event_type"] for event in events] == [
+        "temperature_shock",
+        "heavy_rain_burst",
+    ]
 
 
 def _candidate(
     reading: SimpleNamespace,
     *,
     z: float,
-    event_type: str = "rapid_change",
+    event_type: str = "temperature_shock",
     metric: str = "temperature_2m",
 ) -> EventCandidate:
     return EventCandidate(

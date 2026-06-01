@@ -16,10 +16,16 @@ def test_statistical_detectors_do_not_fire_with_short_history(
     events = detect(current, history)
 
     statistical_types = {
-        "rapid_change",
-        "sustained_extreme",
-        "comfort_divergence",
-        "cross_city_contrast",
+        "temperature_shock",
+        "pressure_plunge",
+        "warm_spell",
+        "cold_spell",
+        "heavy_rain_burst",
+        "wind_gust_burst",
+        "heat_stress",
+        "cold_stress",
+        "forecast_bust",
+        "spatial_anomaly",
     }
     assert not any(event.event_type in statistical_types for event in events)
 

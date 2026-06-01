@@ -4,20 +4,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.detection import detect
-from app.detection.base import DetectorContext, Event, EventCandidate
+from app.detection.base import DetectorContext, EventCandidate
 from app.detection.explain import explain_candidate
-from app.detection.registry import LegacyRuleAdapter, detect_candidates
+from app.detection.registry import detect_candidates
 from app.detection.scoring import candidate_priority_score, priority_score, severity_from_score
 from app.models import Reading
 
 
-def test_eventcandidate_is_legacy_event_alias(reading_factory: Callable[..., Reading]) -> None:
+def test_eventcandidate_is_detector_output_type(reading_factory: Callable[..., Reading]) -> None:
     reading = reading_factory(id=1)
 
-    candidate = Event(
+    candidate = EventCandidate(
         city=reading.city,
         event_ts=reading.observation_ts,
-        event_type="rapid_change",
+        event_type="temperature_shock",
         severity="warning",
         metric="temperature_2m",
         signal_values={"z_score": 3.0},
@@ -25,31 +25,24 @@ def test_eventcandidate_is_legacy_event_alias(reading_factory: Callable[..., Rea
         supporting_reading_ids=[1],
     )
 
-    assert Event is EventCandidate
     assert isinstance(candidate, EventCandidate)
     assert candidate.score_inputs == {}
     assert candidate.evidence == {}
 
 
-def test_registry_adapter_preserves_legacy_detect_outputs(
+def test_default_registry_uses_native_candidates(
     reading_factory: Callable[..., Reading],
 ) -> None:
     history = [
         reading_factory(id=i + 1, hours_offset=-(i + 1), temperature_2m=20.0 + (i % 3))
         for i in range(20)
     ]
-    current = reading_factory(id=100, temperature_2m=26.0)
+    current = reading_factory(id=100, temperature_2m=26.0, weather_code=95)
 
-    legacy_events = LegacyRuleAdapter().detect(DetectorContext(reading=current, history=history))
     public_events = detect(current, history)
 
-    assert [
-        (event.event_type, event.severity, event.metric, event.signal_values)
-        for event in legacy_events
-    ] == [
-        (event.event_type, event.severity, event.metric, event.signal_values)
-        for event in public_events
-    ]
+    assert all(event.detector_version == "native-v1" for event in public_events)
+    assert not any(event.event_type == "wmo_transition" for event in public_events)
 
 
 def test_detect_candidates_runs_registered_detectors_in_order(
@@ -92,7 +85,7 @@ def test_candidate_priority_score_and_explanation_are_pure_helpers(
     candidate = EventCandidate(
         city=reading.city,
         event_ts=reading.observation_ts,
-        event_type="forecast_divergence",
+        event_type="forecast_bust",
         severity="warning",
         metric="temperature_2m",
         signal_values={"abs_error": 8.0, "lead_hours": 6, "forecast_temp": 20.0},
@@ -119,9 +112,9 @@ class StaticDetector:
             EventCandidate(
                 city=ctx.reading.city,
                 event_ts=ctx.reading.observation_ts,
-                event_type="fun_fact",
+                event_type="temperature_shock",
                 severity="info",
-                metric=None,
+                metric="temperature_2m",
                 signal_values={"name": self.name},
                 reason=self.name,
                 supporting_reading_ids=[],

@@ -14,6 +14,7 @@ from app.detection import detect
 from app.detection.rules import DIURNAL_WINDOW_DAYS
 from app.open_meteo import CITIES, City, fetch_city_reading
 from app.storage import (
+    forecast_comparison_pairs,
     latest_peer_readings,
     matching_forecast,
     recent_history,
@@ -138,6 +139,7 @@ def process_reading(
         )
 
         fc = None
+        comparison_pairs = ()
         if resolved_settings.enable_forecast_reconciliation:
             fc = matching_forecast(
                 session,
@@ -146,11 +148,16 @@ def process_reading(
                 resolved_settings.forecast_lead_hours_min,
                 resolved_settings.forecast_lead_hours_max,
             )
+            comparison_pairs = forecast_comparison_pairs(
+                session,
+                reading.observation_ts,
+            )
 
         events = detect(
             reading, history, peers,
             forecast=fc,
             forecast_temp_threshold=resolved_settings.forecast_temp_divergence_c,
+            forecast_comparison_pairs=comparison_pairs,
         )
         if not resolved_settings.enable_fun_facts:
             events = [event for event in events if event.event_type != "fun_fact"]

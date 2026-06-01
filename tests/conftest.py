@@ -104,7 +104,7 @@ def seed_reading(
     return reading
 
 
-def seed_event(session: Session, reading: Reading, event_type: str = "rapid_change") -> Event:
+def seed_event(session: Session, reading: Reading, event_type: str = "temperature_shock") -> Event:
     event = Event(
         city=reading.city,
         event_ts=reading.observation_ts,

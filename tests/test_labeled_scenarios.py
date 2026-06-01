@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.detection import detect
+from app.detection.base import DetectorContext
+from app.detection.registry import detect_candidates
 from tests.labeled_scenarios import SCENARIOS, Scenario
 
 
@@ -17,11 +18,15 @@ from tests.labeled_scenarios import SCENARIOS, Scenario
     ids=[s.name for s in SCENARIOS],
 )
 def test_scenario(scenario: Scenario) -> None:
-    events = detect(
-        scenario.reading,
-        scenario.history,
-        peers=scenario.peers,
-        forecast=scenario.forecast,
+    events = detect_candidates(
+        DetectorContext(
+            reading=scenario.reading,
+            history=scenario.history,
+            peers=scenario.peers,
+            forecast=scenario.forecast,
+            forecast_comparison_pairs=scenario.forecast_comparison_pairs,
+            climatology=scenario.climatology,
+        )
     )
     actual_types = {e.event_type for e in events}
     assert actual_types == scenario.expected_types, (

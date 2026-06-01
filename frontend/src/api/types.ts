@@ -6,12 +6,16 @@ export const SEVERITIES = ["info", "warning", "severe"] as const;
 export type Severity = (typeof SEVERITIES)[number];
 
 export const EVENT_TYPES = [
-  "rapid_change",
-  "sustained_extreme",
-  "wmo_transition",
-  "comfort_divergence",
-  "cross_city_contrast",
-  "forecast_divergence",
+  "temperature_shock",
+  "pressure_plunge",
+  "warm_spell",
+  "cold_spell",
+  "heavy_rain_burst",
+  "wind_gust_burst",
+  "heat_stress",
+  "cold_stress",
+  "forecast_bust",
+  "spatial_anomaly",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

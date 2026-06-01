@@ -5,6 +5,18 @@ from datetime import datetime
 from typing import Any, Protocol
 
 EVENT_TYPES = {
+    "temperature_shock",
+    "pressure_plunge",
+    "warm_spell",
+    "cold_spell",
+    "heavy_rain_burst",
+    "wind_gust_burst",
+    "heat_stress",
+    "cold_stress",
+    "forecast_bust",
+    "spatial_anomaly",
+    # Legacy names are accepted for old stored/evaluation candidates, but the
+    # default registry no longer emits them.
     "rapid_change",
     "sustained_extreme",
     "wmo_transition",
@@ -46,10 +58,6 @@ class EventCandidate:
             raise ValueError("onset_ts must be timezone-aware")
 
 
-# Backward-compatible alias while legacy rule functions are migrated incrementally.
-Event = EventCandidate
-
-
 @dataclass(frozen=True)
 class DetectorContext:
     reading: Any
@@ -74,6 +82,7 @@ def detect(
     peers: dict[str, Any] | None = None,
     forecast: Any | None = None,
     forecast_temp_threshold: float | None = None,
+    forecast_comparison_pairs: tuple[tuple[Any, Any], ...] = (),
 ) -> list[EventCandidate]:
     from app.detection.registry import detect_candidates
 
@@ -84,5 +93,6 @@ def detect(
             peers=peers,
             forecast=forecast,
             forecast_temp_threshold=forecast_temp_threshold,
+            forecast_comparison_pairs=forecast_comparison_pairs,
         )
     )

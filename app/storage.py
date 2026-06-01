@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.detection.base import Event as DetectionEvent
+from app.detection.base import EventCandidate as DetectionEvent
 from app.detection.lifecycle import apply_lifecycle
 from app.detection.scoring import candidate_priority_score, severity_from_score
 from app.models import Event, Forecast, Reading
@@ -181,6 +181,32 @@ def matching_forecast(
             Forecast.lead_hours <= max_lead,
         )
     )
+
+
+def forecast_comparison_pairs(
+    session: Session,
+    before: datetime,
+    *,
+    hours: int = 14 * 24,
+    limit: int = 200,
+) -> tuple[tuple[Reading, Forecast], ...]:
+    """Return recent obs/forecast pairs for global rolling MAE by metric."""
+    if before.tzinfo is None:
+        raise ValueError("before must be timezone-aware")
+    cutoff = before.astimezone(timezone.utc) - timedelta(hours=hours)
+    rows = session.execute(
+        select(Reading, Forecast)
+        .join(
+            Forecast,
+            (Forecast.city == Reading.city)
+            & (Forecast.target_ts == Reading.observation_ts),
+        )
+        .where(Reading.observation_ts < before.astimezone(timezone.utc))
+        .where(Reading.observation_ts >= cutoff)
+        .order_by(Reading.observation_ts.desc())
+        .limit(limit)
+    ).all()
+    return tuple((reading, forecast) for reading, forecast in rows)
 
 
 def count_readings(session: Session) -> int:

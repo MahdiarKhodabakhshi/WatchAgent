@@ -105,10 +105,10 @@ function numericSignal(event: WatchEvent, keys: string[]): number | null {
 }
 
 function chartMetricForEvent(event: WatchEvent): ChartMetric {
-  if (event.metric === "weather_code" || event.event_type === "wmo_transition") {
+  if (event.metric === "weather_code") {
     return "weather";
   }
-  if (event.metric === "wind_speed_10m") {
+  if (event.metric === "wind_speed_10m" || event.metric === "wind_gusts_10m") {
     return "wind";
   }
   if (event.metric === "precipitation") {

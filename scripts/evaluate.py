@@ -39,12 +39,10 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db import build_engine  # noqa: E402
 from app.detection import detect  # noqa: E402
-from app.detection.base import Event  # noqa: E402
-from app.detection.rules import (  # noqa: E402
-    DIURNAL_WINDOW_DAYS,
-    RAPID_CHANGE_Z_SEVERE,
-    RAPID_CHANGE_Z_WARNING,
-)
+from app.detection.base import DetectorContext, EventCandidate  # noqa: E402
+from app.detection.registry import detect_candidates  # noqa: E402
+from app.detection.rules import DIURNAL_WINDOW_DAYS  # noqa: E402
+from app.detection.temperature_shock import TEMPERATURE_SHOCK_Z  # noqa: E402
 from app.detection.timeofday import local_hour  # noqa: E402
 from app.models import Base, Forecast, Reading  # noqa: E402
 from tests.labeled_scenarios import SCENARIOS  # noqa: E402
@@ -112,9 +110,9 @@ def replay_detection(
     readings_by_city: dict[str, list[Reading]],
     forecasts: dict[tuple[str, datetime], Forecast],
     settings: Any,
-) -> list[tuple[Reading, Event]]:
+) -> list[tuple[Reading, EventCandidate]]:
     """Run detect() over every reading with its in-memory history window."""
-    results: list[tuple[Reading, Event]] = []
+    results: list[tuple[Reading, EventCandidate]] = []
     history_hours = DIURNAL_WINDOW_DAYS * 24
 
     for city, readings in readings_by_city.items():
@@ -154,11 +152,15 @@ def evaluate_labeled() -> tuple[int, int, int, list[str]]:
     tp = fp = fn = 0
     details: list[str] = []
     for s in SCENARIOS:
-        events = detect(
-            s.reading,
-            s.history,
-            peers=s.peers,
-            forecast=s.forecast,
+        events = detect_candidates(
+            DetectorContext(
+                reading=s.reading,
+                history=s.history,
+                peers=s.peers,
+                forecast=s.forecast,
+                forecast_comparison_pairs=s.forecast_comparison_pairs,
+                climatology=s.climatology,
+            )
         )
         actual = {e.event_type for e in events}
         hits = actual & s.expected_types
@@ -184,7 +186,7 @@ def _fmt_set(s: set[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def event_rate_table_v2(
-    results: list[tuple[Reading, Event]],
+    results: list[tuple[Reading, EventCandidate]],
     readings_by_city: dict[str, list[Reading]],
 ) -> str:
     counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -204,7 +206,7 @@ def event_rate_table_v2(
     return "\n".join(lines)
 
 
-def severity_table(results: list[tuple[Reading, Event]]) -> str:
+def severity_table(results: list[tuple[Reading, EventCandidate]]) -> str:
     counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for _, ev in results:
         counts[ev.event_type][ev.severity] += 1
@@ -221,15 +223,15 @@ def severity_table(results: list[tuple[Reading, Event]]) -> str:
     return "\n".join(lines)
 
 
-def baseline_kind_split(results: list[tuple[Reading, Event]]) -> str:
+def baseline_kind_split(results: list[tuple[Reading, EventCandidate]]) -> str:
     counter: Counter[str] = Counter()
     for _, ev in results:
-        if ev.event_type == "rapid_change":
-            kind = ev.signal_values.get("baseline_kind", "unknown")
+        if ev.event_type == "temperature_shock":
+            kind = ev.signal_values.get("baseline_bucket", "unknown")
             counter[kind] += 1
     total = sum(counter.values())
     if total == 0:
-        return "No rapid_change events found."
+        return "No temperature_shock events found."
     lines = ["| baseline_kind | count | fraction |", "|---|---:|---:|"]
     for kind in sorted(counter):
         lines.append(
@@ -240,7 +242,7 @@ def baseline_kind_split(results: list[tuple[Reading, Event]]) -> str:
 
 
 def forecast_skill(
-    results: list[tuple[Reading, Event]],
+    results: list[tuple[Reading, EventCandidate]],
     forecasts: dict[tuple[str, datetime], Forecast],
     readings_by_city: dict[str, list[Reading]],
 ) -> str:
@@ -257,13 +259,13 @@ def forecast_skill(
                 abs_errors.append(abs(float(r.temperature_2m) - float(fc.temperature_2m)))
 
     n_events = sum(
-        1 for _, ev in results if ev.event_type == "forecast_divergence"
+        1 for _, ev in results if ev.event_type == "forecast_bust"
     )
     mae = sum(abs_errors) / len(abs_errors) if abs_errors else 0.0
     return (
         f"- Forecast/actual pairs compared: **{len(abs_errors)}**\n"
         f"- Mean absolute temperature error: **{mae:.2f} °C**\n"
-        f"- forecast_divergence events fired: **{n_events}**"
+        f"- forecast_bust events fired: **{n_events}**"
     )
 
 
@@ -271,26 +273,20 @@ def forecast_skill(
 # Figures
 # ---------------------------------------------------------------------------
 
-def plot_zscore_histogram(results: list[tuple[Reading, Event]]) -> Path:
+def plot_zscore_histogram(results: list[tuple[Reading, EventCandidate]]) -> Path:
     zscores = [
         ev.signal_values["z_score"]
         for _, ev in results
-        if ev.event_type == "rapid_change" and "z_score" in ev.signal_values
+        if ev.event_type == "temperature_shock" and "z_score" in ev.signal_values
     ]
     fig, ax = plt.subplots(figsize=(8, 4))
     if zscores:
         ax.hist(zscores, bins=30, edgecolor="black", alpha=0.7)
-    warn_label = f"warning = {RAPID_CHANGE_Z_WARNING}"
-    sev_label = f"severe = {RAPID_CHANGE_Z_SEVERE}"
-    ax.axvline(
-        RAPID_CHANGE_Z_WARNING, color="orange", ls="--", label=warn_label,
-    )
-    ax.axvline(
-        RAPID_CHANGE_Z_SEVERE, color="red", ls="--", label=sev_label,
-    )
+    warn_label = f"temperature_shock z = {TEMPERATURE_SHOCK_Z}"
+    ax.axvline(TEMPERATURE_SHOCK_Z, color="orange", ls="--", label=warn_label)
     ax.set_xlabel("z-score")
     ax.set_ylabel("count")
-    ax.set_title("rapid_change z-score distribution (events only)")
+    ax.set_title("temperature_shock z-score distribution (events only)")
     ax.legend()
     fig.tight_layout()
     path = FIG_DIR / "zscore_histogram.png"
@@ -299,7 +295,7 @@ def plot_zscore_histogram(results: list[tuple[Reading, Event]]) -> Path:
     return path
 
 
-def plot_events_by_local_hour(results: list[tuple[Reading, Event]]) -> Path:
+def plot_events_by_local_hour(results: list[tuple[Reading, EventCandidate]]) -> Path:
     hour_counts: Counter[int] = Counter()
     for reading, _ev in results:
         lh = local_hour(reading.city, reading.observation_ts)
@@ -321,7 +317,7 @@ def plot_events_by_local_hour(results: list[tuple[Reading, Event]]) -> Path:
     return path
 
 
-def plot_severity_pie(results: list[tuple[Reading, Event]]) -> Path:
+def plot_severity_pie(results: list[tuple[Reading, EventCandidate]]) -> Path:
     counter: Counter[str] = Counter()
     for _, ev in results:
         counter[ev.severity] += 1
@@ -384,8 +380,6 @@ def main() -> None:
     sev_table = severity_table(results)
     bl_split = baseline_kind_split(results)
     fc_skill = forecast_skill(results, forecasts, readings_by_city)
-    fc_thresh = settings.forecast_temp_divergence_c
-
     md = f"""# WatchAgent — Detector Evaluation
 
 > **Regenerate**: after running `python -m app.backfill` to populate the DB,
@@ -425,18 +419,18 @@ This evaluation has two distinct layers:
 
 {sev_table}
 
-## Rapid-change z-score distribution
+## Temperature-shock z-score distribution
 
 ![z-score histogram](evaluation/zscore_histogram.png)
 
-Events only fire above the warning threshold ({RAPID_CHANGE_Z_WARNING});
-the histogram shows where fired events sit relative to the severe cutoff
-({RAPID_CHANGE_Z_SEVERE}).
+Temperature-shock events require local-hour climatology z ≥ {TEMPERATURE_SHOCK_Z}
+and a large 3-hour derivative. The histogram shows where fired events sit
+relative to that z gate.
 
 ## Diurnal baseline split
 
-For `rapid_change` events, how many used the 14-day same-local-hour
-baseline vs the fallback rolling 24-hour window:
+For `temperature_shock` events, how many used the local-hour climatology
+bucket vs lower-confidence fallbacks:
 
 {bl_split}
 
@@ -451,18 +445,14 @@ not be skewed toward warm afternoon hours:
 
 ## Threshold justification
 
-- **rapid_change** uses z ≥ {RAPID_CHANGE_Z_WARNING} (warning) and z ≥ {RAPID_CHANGE_Z_SEVERE}
-  (severe). The z-score histogram above shows these thresholds sit in the
-  tail of the distribution — most readings fall well below, confirming
-  the detector is not over-sensitive.
-- **sustained_extreme** uses p5/p95 percentile thresholds over a 48-hour
-  window with a 3-reading streak requirement, limiting false positives
-  to sustained outliers.
-- **comfort_divergence** fires when the apparent-actual gap exceeds
-  mean + 2× std of recent gaps, a standard anomaly threshold.
-- **forecast_divergence** uses a {fc_thresh}°C temperature threshold
-  and ≥ 2 WMO-level jump for weather code mismatches — calibrated to
-  avoid nuisance alerts from small forecast inaccuracies.
+- **temperature_shock** requires local-hour climatology z plus a 3-hour
+  derivative so diurnal temperature swings are not mistaken for incidents.
+- **heavy_rain_burst** uses wet-hour amount percentiles only; dry hours are
+  never interpreted as a lower-tail precipitation event.
+- **forecast_bust** normalizes observed-vs-stored forecast error by recent
+  global rolling MAE per metric, not a fixed temperature-only threshold.
+- **spatial_anomaly** compares cities in z-space after each city is
+  calibrated against its own climatology.
 
 ## Limitations
 
@@ -470,11 +460,9 @@ not be skewed toward warm afternoon hours:
   ecological validity against real weather phenomena.
 - Backfill characterization has **no ground truth**. Event rates and
   distributions are descriptive, not measures of accuracy.
-- Cross-city contrast is sensitive to the p95 historical diff; cities with
-  correlated climates may produce fewer events than expected.
-- The diurnal baseline requires ≥ 7 same-hour readings over 14 days;
-  gaps in polling cause fallback to the rolling window, which may be
-  noisier for cities with large diurnal temperature swings.
+- The initial detector thresholds are intentionally conservative calibration
+  anchors; the next evaluation phase should tune event rate and fragmentation
+  against replay metrics.
 """
 
     EVAL_PATH.write_text(md)

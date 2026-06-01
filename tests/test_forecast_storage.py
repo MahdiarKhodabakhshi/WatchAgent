@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models import Forecast
-from app.storage import matching_forecast, store_forecast_if_new
+from app.models import Forecast, Reading
+from app.storage import forecast_comparison_pairs, matching_forecast, store_forecast_if_new
 
 BASE_TS = datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc)
 
@@ -88,3 +88,37 @@ def test_matching_forecast_returns_none_for_missing(db_session: Session) -> None
     """No stored forecast for a target_ts returns None."""
     result = matching_forecast(db_session, "Toronto", BASE_TS, min_lead=3, max_lead=12)
     assert result is None
+
+
+def test_forecast_comparison_pairs_are_global_not_city_filtered(db_session: Session) -> None:
+    for idx, city in enumerate(("Toronto", "Ottawa")):
+        target_ts = BASE_TS - timedelta(hours=idx + 1)
+        db_session.add(
+            Reading(
+                city=city,
+                observation_ts=target_ts,
+                polled_at=target_ts + timedelta(minutes=5),
+                temperature_2m=20.0 + idx,
+                apparent_temperature=20.0 + idx,
+                precipitation=0.0,
+                wind_speed_10m=10.0,
+                weather_code=0,
+            )
+        )
+        db_session.add(
+            Forecast(
+                city=city,
+                target_ts=target_ts,
+                issued_at=target_ts - timedelta(hours=6),
+                lead_hours=6,
+                temperature_2m=19.0 + idx,
+                precipitation=0.0,
+                wind_speed_10m=10.0,
+                weather_code=0,
+            )
+        )
+    db_session.commit()
+
+    pairs = forecast_comparison_pairs(db_session, BASE_TS)
+
+    assert {reading.city for reading, _forecast in pairs} == {"Toronto", "Ottawa"}

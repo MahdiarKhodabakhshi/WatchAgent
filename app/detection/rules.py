@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.detection.base import MIN_HISTORY_FOR_STATS, Event
+from app.detection.base import MIN_HISTORY_FOR_STATS
+from app.detection.base import EventCandidate as Event
 from app.detection.statistics import (
     mean,
     metric_values,
