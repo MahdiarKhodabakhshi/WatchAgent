@@ -16,3 +16,11 @@ def local_hour(city: str, observation_ts: datetime) -> int | None:
     if tz is None or observation_ts.tzinfo is None:
         return None
     return observation_ts.astimezone(tz).hour
+
+
+def local_month(city: str, observation_ts: datetime) -> int | None:
+    """Local calendar month (1-12) for a UTC, tz-aware observation. Pure."""
+    tz = CITY_TIMEZONES.get(city)
+    if tz is None or observation_ts.tzinfo is None:
+        return None
+    return observation_ts.astimezone(tz).month

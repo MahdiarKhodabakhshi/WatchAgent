@@ -110,6 +110,15 @@ curl "http://localhost:8000/events?limit=10"
 Tip: set `ENABLE_POLLER=false` in `.env` while backfilling to avoid mixing live readings with the
 historical load.
 
+### Rebuild climatology artifact
+
+Runtime code loads the committed `app/data/climatology.json` artifact; it does not call Open-Meteo
+at startup. To refresh the 2021-2025 local-hour climatology from the Open-Meteo archive API:
+
+```bash
+python scripts/build_climatology.py --start-date 2021-01-01 --end-date 2025-12-31
+```
+
 ## API
 
 ### `GET /health`
