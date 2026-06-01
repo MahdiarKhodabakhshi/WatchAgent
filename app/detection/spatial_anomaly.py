@@ -12,7 +12,8 @@ from app.detection.native_common import (
 from app.features import median, peer_z_values
 
 SPATIAL_Z_GAP = 5.0
-SPATIAL_METRICS = ("temperature_2m", "wind_gusts_10m", "pressure_msl", "precipitation")
+SPATIAL_MIN_OWN_Z = 3.0
+SPATIAL_METRICS = ("temperature_2m", "wind_gusts_10m", "pressure_msl")
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,9 @@ class SpatialAnomalyDetector:
             )
             if current_z.z is None:
                 continue
+            own_abs_z = abs(current_z.z)
+            if own_abs_z < SPATIAL_MIN_OWN_Z:
+                continue
 
             peers = peer_z_values(ctx.peers, metric, climatology)
             usable_peer_z = [
@@ -51,7 +55,7 @@ class SpatialAnomalyDetector:
                 continue
 
             signal_values = {
-                "z_score": round(abs(current_z.z), 3),
+                "z_score": round(own_abs_z, 3),
                 "signed_z_score": round(current_z.z, 3),
                 "peer_median_z": round(peer_median, 3),
                 "difference": round(z_gap, 3),
@@ -70,7 +74,7 @@ class SpatialAnomalyDetector:
                     ),
                     score_inputs={
                         "spatial": min(z_gap / 5.0, 1.0),
-                        "rarity": min(abs(current_z.z) / 4.0, 1.0),
+                        "rarity": min(own_abs_z / 4.0, 1.0),
                         "confidence": confidence_input(current_z.confidence),
                     },
                     detector_name=self.name,

@@ -131,8 +131,29 @@ def test_heavy_rain_burst_fires_on_wet_hour_amount() -> None:
 
     assert len(events) == 1
     assert events[0].event_type == "heavy_rain_burst"
+    assert events[0].severity == "severe"
     assert events[0].signal_values["amount_mm"] == 12.0
     assert events[0].signal_values["threshold_mm"] == 10.0
+
+
+def test_heavy_rain_burst_fires_on_short_window_accumulation() -> None:
+    detector = HeavyRainBurstDetector()
+    current = _reading(id=100, precipitation=2.0)
+    history = _history(
+        {
+            -1: {"precipitation": 3.0},
+            -2: {"precipitation": 3.0},
+            -3: {"precipitation": 3.0},
+        }
+    )
+
+    events = detector.detect(_ctx(current, history))
+
+    assert len(events) == 1
+    assert events[0].event_type == "heavy_rain_burst"
+    assert events[0].severity == "severe"
+    assert events[0].signal_values["trigger"] == "accumulation"
+    assert events[0].signal_values["accumulation_mm"] == 11.0
 
 
 def test_heavy_rain_burst_near_miss_does_not_fire() -> None:
@@ -145,8 +166,14 @@ def test_heavy_rain_burst_near_miss_does_not_fire() -> None:
 def test_heavy_rain_burst_dry_hours_never_fire() -> None:
     detector = HeavyRainBurstDetector()
     current = _reading(id=100, precipitation=0.0)
+    history = _history(
+        {
+            -1: {"precipitation": 8.0},
+            -2: {"precipitation": 8.0},
+        }
+    )
 
-    assert detector.detect(_ctx(current, _history())) == []
+    assert detector.detect(_ctx(current, history)) == []
 
 
 def test_heavy_rain_burst_cold_start_does_not_fire() -> None:
@@ -311,6 +338,17 @@ def test_spatial_anomaly_near_miss_does_not_fire() -> None:
     peers = {
         "Ottawa": _reading(id=200, city="Ottawa", temperature_2m=20.0),
         "Vancouver": _reading(id=201, city="Vancouver", temperature_2m=15.0),
+    }
+
+    assert detector.detect(_ctx(current, _history(), peers=peers)) == []
+
+
+def test_spatial_anomaly_requires_own_city_anomaly_not_just_geography() -> None:
+    detector = SpatialAnomalyDetector()
+    current = _reading(id=100, temperature_2m=20.0)
+    peers = {
+        "Ottawa": _reading(id=200, city="Ottawa", temperature_2m=32.0),
+        "Vancouver": _reading(id=201, city="Vancouver", temperature_2m=27.0),
     }
 
     assert detector.detect(_ctx(current, _history(), peers=peers)) == []

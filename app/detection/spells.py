@@ -74,6 +74,7 @@ def _detect_spell(
             ),
             score_inputs={
                 "rarity": min(abs_z / 4.0, 1.0),
+                "magnitude": min(abs_z / 6.0, 1.0),
                 "persistence": min(abs_z / 4.0, 1.0),
                 "confidence": confidence_input(z.confidence),
             },

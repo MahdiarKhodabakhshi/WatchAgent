@@ -96,10 +96,10 @@ KNOWN_EVENT_SPOT_CHECKS = [
             "city-of-toronto-provides-an-update-on-response-efforts-following-heavy-rainfall/"
         ),
         "source_summary": "City reported more than 100 mm in pockets across Toronto.",
-        "incident": "spatial_anomaly / precipitation",
-        "incident_ts": "2024-07-16 14:00 UTC",
-        "score": "45.0",
-        "evidence": "warning; precipitation z=6.0 vs peer median z=0.5",
+        "incident": "heavy_rain_burst / precipitation",
+        "incident_ts": "2024-07-16 17:00 UTC",
+        "score": "67.0",
+        "evidence": "severe; 6h accumulation trigger reached 11.0 mm in archive data",
     },
     {
         "event": "Vancouver January deep freeze",
@@ -111,8 +111,8 @@ KNOWN_EVENT_SPOT_CHECKS = [
         "source_summary": "ECCC noted wind chills reaching Vancouver's waterfront.",
         "incident": "cold_spell / temperature_2m",
         "incident_ts": "2024-01-11 21:00 UTC",
-        "score": "50.0 peak candidate",
-        "evidence": "warning; Jan 12 candidates reached z=4.2 to z=7.1",
+        "score": "70.0",
+        "evidence": "severe; Jan 12 candidates reached z=4.2 to z=7.1",
     },
     {
         "event": "Ottawa severe thunderstorm/outages",
@@ -122,10 +122,10 @@ KNOWN_EVENT_SPOT_CHECKS = [
             "environment-canada-issues-severe-thunderstorm-warning-for-ottawa/"
         ),
         "source_summary": "Thousands lost power; ECCC warned of downpours, hail, wind.",
-        "incident": "spatial_anomaly / precipitation",
-        "incident_ts": "2023-06-27 01:00 UTC",
-        "score": "45.0",
-        "evidence": "warning; precipitation z=50.0 vs peer median z=0.0",
+        "incident": "heavy_rain_burst / precipitation",
+        "incident_ts": "2023-06-27 02:00 UTC",
+        "score": "65.2",
+        "evidence": "severe; 6h accumulation trigger reached 10.6 mm in archive data",
     },
 ]
 
@@ -148,6 +148,7 @@ class CalibrationProfile:
     strong_cold_wind_chill: float
     forecast_bust_k: float
     spatial_z_gap: float
+    spatial_min_own_z: float
 
 
 INITIAL_PROFILE = CalibrationProfile(
@@ -167,6 +168,7 @@ INITIAL_PROFILE = CalibrationProfile(
     strong_cold_wind_chill=-35.0,
     forecast_bust_k=2.0,
     spatial_z_gap=3.0,
+    spatial_min_own_z=0.0,
 )
 
 
@@ -194,7 +196,7 @@ class ReplayData:
         return sum(self.city_days_by_city.values())
 
 
-@dataclass(frozen=True)
+@dataclass
 class IncidentRecord:
     city: str
     event_type: str
@@ -209,8 +211,7 @@ class _IncidentState:
     event_type: str
     active: bool = False
     clear_count: int = 0
-    priority_score: float = 0.0
-    event_ts: datetime | None = None
+    incident: IncidentRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -431,17 +432,18 @@ def _collapse_candidates(
                 state.clear_count += 1
                 if state.clear_count >= 2:
                     state.active = False
+                    state.incident = None
                 continue
             state.clear_count = 0
-            state.priority_score = max(state.priority_score, score)
+            if state.incident is not None and score > state.incident.priority_score:
+                state.incident.priority_score = score
+                state.incident.severity = candidate.severity
             continue
         if strength < 1.0:
             state.clear_count = 0
             continue
         state.active = True
         state.clear_count = 0
-        state.priority_score = score
-        state.event_ts = candidate.event_ts
         incident = IncidentRecord(
             city=candidate.city,
             event_type=candidate.event_type,
@@ -449,6 +451,7 @@ def _collapse_candidates(
             severity=candidate.severity,
             priority_score=score,
         )
+        state.incident = incident
         touched.append(incident)
 
     for key, state in list(states.items()):
@@ -457,6 +460,7 @@ def _collapse_candidates(
         state.clear_count += 1
         if state.clear_count >= 2:
             state.active = False
+            state.incident = None
     return touched
 
 
@@ -510,7 +514,10 @@ def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
             "STRONG_COLD_WIND_CHILL": profile.strong_cold_wind_chill,
         },
         forecast_bust_module: {"FORECAST_BUST_K": profile.forecast_bust_k},
-        spatial_module: {"SPATIAL_Z_GAP": profile.spatial_z_gap},
+        spatial_module: {
+            "SPATIAL_Z_GAP": profile.spatial_z_gap,
+            "SPATIAL_MIN_OWN_Z": profile.spatial_min_own_z,
+        },
     }
     originals: list[tuple[Any, str, Any]] = []
     for module, values in patches.items():
@@ -542,6 +549,7 @@ def current_profile() -> CalibrationProfile:
         strong_cold_wind_chill=stress_module.STRONG_COLD_WIND_CHILL,
         forecast_bust_k=forecast_bust_module.FORECAST_BUST_K,
         spatial_z_gap=spatial_module.SPATIAL_Z_GAP,
+        spatial_min_own_z=spatial_module.SPATIAL_MIN_OWN_Z,
     )
 
 
@@ -700,7 +708,7 @@ def calibration_changes_table() -> str:
         "| pressure_plunge | fall 4hPa -> 6hPa; wind rise 5 -> 8 km/h; "
         "gust confirm 50 -> 60 km/h | Keep only stronger storm corroboration. |",
         "| heavy_rain_burst | kept 10mm/h | "
-        "Per-type replay showed 15mm/h over-suppressed rain bursts. |",
+        "Added 6h accumulation scoring so real flash-flood signals reach severe. |",
         "| wind_gust_burst | z 2.8 -> 3.2; gust anchor 90 unchanged | "
         "Prefer climatology-rare gusts unless an ECCC-scale gust occurs. |",
         "| heat_stress | Humidex 35 -> 38 | "
@@ -709,8 +717,9 @@ def calibration_changes_table() -> str:
         "Per-type replay showed -30 was effectively dead for city-center data. |",
         "| forecast_bust | normalized error 2.0 -> 2.5 | "
         "Require clearer surprise over global rolling MAE. |",
-        "| spatial_anomaly | peer z-gap 3.0 -> 5.0 | "
-        "It was the one detector dominating the mix after aggregate calibration. |",
+        "| spatial_anomaly | peer z-gap 3.0 -> 5.0; own `|z_hod|` >= 3.0; "
+        "precipitation removed | It was the one detector dominating the mix, "
+        "and geography alone is not an event. |",
         "| scoring weights | unchanged | "
         "The replay showed trigger volume, not feed ranking, was the rate issue. |",
     ]
@@ -825,6 +834,8 @@ def write_evaluation(
 - Native replay collapses detector candidates with the same stable dedupe keys,
   enter threshold, and absent-reading resolution used by lifecycle. No live
   application state is touched.
+- The final native table is the **current after-state** after spatial z-gap was
+  raised to 5.0 and the structural own-anomaly gate was added.
 - `raw_to_incident_collapse` is raw detector firings divided by lifecycle
   incidents. It is a deduplication win metric, but it blends instantaneous and
   sustained event types, so read it as an average collapse ratio.
@@ -852,9 +863,15 @@ Interpretation:
   heat_stress 45, cold_stress 30, warm_spell 63, cold_spell 60.
 - Forecast-bust is zero in archive mode because the Open-Meteo archive has no
   stored forecasts; it remains covered by unit and labeled tests.
-- Spatial anomaly is still the largest type at 0.559 incidents/city-day
-  (about 3.9 per city-week). It was the only noisy detector surfaced by the
-  per-type table, so only that threshold was tightened further.
+- Spatial anomaly compares each city in `z_hod` space against that city's own
+  climatology first, then compares the standardized value to peers. A city must
+  be anomalous in its own right and far from peer z-values; normal-for-Vancouver
+  mildness beside normal-for-Ottawa cold is not an event.
+- Spatial anomaly is now 34/753 incidents (4.5%), so it no longer dominates the
+  feed.
+- Spatial incidents use `city|spatial_anomaly|metric` as their dedupe key, with
+  no timestamp component, so multi-hour contrasts collapse into one incident
+  until lifecycle resolves them.
 
 ## Per-City Incident Rates
 

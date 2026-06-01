@@ -145,8 +145,8 @@ def test_phase0_pure_detection_outputs_for_fixed_sequence() -> None:
     ] == [
         ("temperature_shock", "severe", "temperature_2m"),
         ("pressure_plunge", "warning", "pressure_msl"),
-        ("warm_spell", "warning", "temperature_2m"),
-        ("heavy_rain_burst", "warning", "precipitation"),
+        ("warm_spell", "severe", "temperature_2m"),
+        ("heavy_rain_burst", "severe", "precipitation"),
         ("wind_gust_burst", "warning", "wind_gusts_10m"),
         ("forecast_bust", "warning", "temperature_2m"),
         ("spatial_anomaly", "warning", "temperature_2m"),

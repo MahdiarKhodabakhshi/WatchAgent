@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 from app.detection.base import DetectorContext, EventCandidate
 from app.detection.native_common import (
@@ -8,9 +9,12 @@ from app.detection.native_common import (
     confidence_input,
     has_native_history,
     make_candidate,
+    numeric_attr,
 )
 
 MIN_HEAVY_RAIN_MM = 10.0
+HEAVY_RAIN_ACCUMULATION_HOURS = 6
+MIN_HEAVY_RAIN_ACCUMULATION_MM = 10.0
 ECCC_ONE_HOUR_RAIN_MM = 25.0
 
 
@@ -36,15 +40,23 @@ class HeavyRainBurstDetector:
         if p95 is None:
             return []
 
-        threshold = max(p95, MIN_HEAVY_RAIN_MM)
-        if precip.amount_mm < threshold:
+        hourly_threshold = max(p95, MIN_HEAVY_RAIN_MM)
+        accumulation = _recent_accumulation_mm(ctx)
+        accumulation_threshold = max(hourly_threshold, MIN_HEAVY_RAIN_ACCUMULATION_MM)
+        hourly_fire = precip.amount_mm >= hourly_threshold
+        accumulation_fire = accumulation >= accumulation_threshold
+        if not hourly_fire and not accumulation_fire:
             return []
 
         signal_values = {
             "amount_mm": round(precip.amount_mm, 3),
-            "difference": round(precip.amount_mm, 3),
+            "accumulation_mm": round(accumulation, 3),
+            "difference": round(max(precip.amount_mm, accumulation), 3),
             "wet_hour_p95_mm": round(p95, 3),
-            "threshold_mm": round(threshold, 3),
+            "threshold_mm": round(hourly_threshold, 3),
+            "accumulation_hours": HEAVY_RAIN_ACCUMULATION_HOURS,
+            "accumulation_threshold_mm": round(accumulation_threshold, 3),
+            "trigger": "hourly" if hourly_fire else "accumulation",
             "wet_amount_percentile": precip.wet_amount_percentile,
             "wet_count": precip.wet_count,
             "total_count": precip.total_count,
@@ -58,15 +70,35 @@ class HeavyRainBurstDetector:
                 signal_values=signal_values,
                 reason=(
                     f"{ctx.reading.city} has a heavy rain burst: "
-                    f"{precip.amount_mm:.1f} mm this hour exceeds the wet-hour "
-                    f"threshold of {threshold:.1f} mm."
+                    f"{precip.amount_mm:.1f} mm this hour and "
+                    f"{accumulation:.1f} mm over {HEAVY_RAIN_ACCUMULATION_HOURS}h "
+                    f"exceeds the wet-hour threshold of {hourly_threshold:.1f} mm."
                 ),
                 score_inputs={
-                    "rarity": min((precip.wet_amount_percentile or 95) / 99.0, 1.0),
-                    "magnitude": min(precip.amount_mm / ECCC_ONE_HOUR_RAIN_MM, 1.0),
-                    "compound": 0.5 if precip.amount_mm >= ECCC_ONE_HOUR_RAIN_MM else 0.0,
-                    "confidence": confidence_input(precip.confidence),
+                    "rarity": 1.0 if hourly_fire or accumulation_fire else 0.0,
+                    "magnitude": min(
+                        max(precip.amount_mm, accumulation) / 20.0,
+                        1.0,
+                    ),
+                    "persistence": min(accumulation / 15.0, 1.0),
+                    "compound": 1.0 if accumulation_fire else 0.5,
+                    "confidence": confidence_input(max(precip.confidence, 0.8)),
                 },
                 detector_name=self.name,
             )
         ]
+
+
+def _recent_accumulation_mm(ctx: DetectorContext) -> float:
+    current = numeric_attr(ctx.reading, "precipitation") or 0.0
+    if getattr(ctx.reading, "observation_ts", None) is None:
+        return current
+    cutoff = ctx.reading.observation_ts
+    start = cutoff - timedelta(hours=HEAVY_RAIN_ACCUMULATION_HOURS)
+    total = current
+    for item in ctx.history:
+        ts = getattr(item, "observation_ts", None)
+        if ts is None or not (start < ts < cutoff):
+            continue
+        total += numeric_attr(item, "precipitation") or 0.0
+    return total
