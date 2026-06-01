@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 EVENT_TYPES = {
     "rapid_change",
@@ -18,7 +18,7 @@ MIN_HISTORY_FOR_STATS = 12
 
 
 @dataclass(frozen=True)
-class Event:
+class EventCandidate:
     city: str
     event_ts: datetime
     event_type: str
@@ -27,6 +27,13 @@ class Event:
     signal_values: dict[str, Any]
     reason: str
     supporting_reading_ids: list[int]
+    dedupe_key: str | None = None
+    onset_ts: datetime | None = None
+    score_inputs: dict[str, float] = field(default_factory=dict)
+    severity_hint: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+    detector_name: str | None = None
+    detector_version: str | None = None
 
     def __post_init__(self) -> None:
         if self.event_type not in EVENT_TYPES:
@@ -35,6 +42,30 @@ class Event:
             raise ValueError(f"Unknown severity: {self.severity}")
         if self.event_ts.tzinfo is None:
             raise ValueError("event_ts must be timezone-aware")
+        if self.onset_ts is not None and self.onset_ts.tzinfo is None:
+            raise ValueError("onset_ts must be timezone-aware")
+
+
+# Backward-compatible alias while legacy rule functions are migrated incrementally.
+Event = EventCandidate
+
+
+@dataclass(frozen=True)
+class DetectorContext:
+    reading: Any
+    history: list[Any]
+    peers: dict[str, Any] | None = None
+    forecast: Any | None = None
+    forecast_temp_threshold: float | None = None
+    climatology: Any | None = None
+    forecast_comparison_pairs: tuple[tuple[Any, Any], ...] = ()
+
+
+class Detector(Protocol):
+    name: str
+    family: str
+
+    def detect(self, ctx: DetectorContext) -> list[EventCandidate]: ...
 
 
 def detect(
@@ -43,37 +74,15 @@ def detect(
     peers: dict[str, Any] | None = None,
     forecast: Any | None = None,
     forecast_temp_threshold: float | None = None,
-) -> list[Event]:
-    from app.detection.rules import (
-        FORECAST_TEMP_DIVERGENCE_C,
-        detect_comfort_divergence,
-        detect_cross_city_contrast,
-        detect_forecast_divergence,
-        detect_fun_facts,
-        detect_rapid_change,
-        detect_sustained_extreme,
-        detect_wmo_transition,
-    )
+) -> list[EventCandidate]:
+    from app.detection.registry import detect_candidates
 
-    events: list[Event] = []
-    events.extend(detect_wmo_transition(reading, history))
-
-    if len(history) >= MIN_HISTORY_FOR_STATS:
-        events.extend(detect_rapid_change(reading, history))
-        events.extend(detect_sustained_extreme(reading, history))
-        events.extend(detect_comfort_divergence(reading, history))
-
-    if peers and len(history) >= MIN_HISTORY_FOR_STATS:
-        events.extend(detect_cross_city_contrast(reading, history, peers))
-
-    if forecast is not None:
-        threshold = (
-            forecast_temp_threshold
-            if forecast_temp_threshold is not None
-            else FORECAST_TEMP_DIVERGENCE_C
+    return detect_candidates(
+        DetectorContext(
+            reading=reading,
+            history=history,
+            peers=peers,
+            forecast=forecast,
+            forecast_temp_threshold=forecast_temp_threshold,
         )
-        events.extend(detect_forecast_divergence(reading, forecast, threshold))
-
-    events.extend(detect_fun_facts(reading, history, peers))
-
-    return events
+    )

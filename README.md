@@ -242,6 +242,14 @@ Fun facts are a deliberate separate layer: they always use severity `info`, keep
 with `ENABLE_FUN_FACTS=false` without changing detection. They are never mixed into the alerting
 path.
 
+### Detector contract migration
+
+The target detector contract is `DetectorContext -> list[EventCandidate]`. During the incremental
+rewrite, `app.detection.base.Event` remains a compatibility alias for `EventCandidate`, and
+`registry.LegacyRuleAdapter` preserves the existing detector order and outputs. The new scoring and
+explanation helpers are pure and tested, but are not wired into stored severity or feed ordering
+until the lifecycle phase.
+
 ### Diurnal-aware baselines
 
 A 24-hour rolling mean treats 3pm the same as 3am. In cities with large diurnal temperature swings,

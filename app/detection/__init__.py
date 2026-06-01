@@ -1,3 +1,3 @@
-from app.detection.base import Event, detect
+from app.detection.base import DetectorContext, Event, EventCandidate, detect
 
-__all__ = ["Event", "detect"]
+__all__ = ["DetectorContext", "Event", "EventCandidate", "detect"]
