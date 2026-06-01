@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pydantic import BaseModel, Field  # noqa: E402
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import desc, func, select  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
@@ -23,7 +23,20 @@ from app.detection.statistics import mean, percentile, population_std  # noqa: E
 from app.models import Event, Reading  # noqa: E402
 
 CityName = Literal["Ottawa", "Toronto", "Vancouver"]
-MetricName = Literal["temperature_2m", "apparent_temperature", "precipitation", "wind_speed_10m"]
+MetricName = Literal[
+    "temperature_2m",
+    "apparent_temperature",
+    "precipitation",
+    "wind_speed_10m",
+    "surface_pressure",
+    "pressure_msl",
+    "relative_humidity_2m",
+    "dew_point_2m",
+    "wind_gusts_10m",
+    "cloud_cover",
+    "snowfall",
+    "snow_depth",
+]
 
 MAX_STEPS = 6
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
@@ -103,7 +116,12 @@ def query_events(**kwargs: Any) -> dict[str, Any]:
             query = query.where(Event.event_ts >= args.start)
         if args.end:
             query = query.where(Event.event_ts <= args.end)
-        rows = session.scalars(query.order_by(Event.event_ts.desc()).limit(args.limit)).all()
+        rows = session.scalars(
+            query.order_by(
+                desc(Event.priority_score).nulls_last(),
+                Event.event_ts.desc(),
+            ).limit(args.limit),
+        ).all()
         return {"events": [_event_to_dict(row) for row in rows], "count": len(rows)}
 
 
@@ -219,9 +237,15 @@ SYSTEM_PROMPT = """You answer questions about the WatchAgent SQLite database.
 
 Schema reminder:
 - readings(city, observation_ts, polled_at, temperature_2m, apparent_temperature,
-  precipitation, wind_speed_10m, weather_code)
+  precipitation, wind_speed_10m, weather_code, surface_pressure, pressure_msl,
+  relative_humidity_2m, dew_point_2m, wind_gusts_10m, cloud_cover, snowfall,
+  snow_depth)
 - events(city, event_ts, created_at, event_type, severity, metric, signal_values,
-  reason, supporting_reading_ids)
+  reason, supporting_reading_ids, status, onset_ts, peak_ts, resolved_ts,
+  priority_score, confidence, detector_name, dedupe_key, evidence)
+
+WatchAgent stores lifecycle incidents. Severity is derived from priority_score, and
+/events is sorted by priority_score first.
 
 Use tools for evidence. Before finalizing, verify that the answer is supported by tool outputs.
 Return only JSON with keys: answer, evidence, tool_calls, confidence.
@@ -306,7 +330,7 @@ def analyze(question: str) -> AnalysisResult:
         import anthropic
     except ImportError:
         return AnalysisResult(
-            answer='Install analysis dependencies with `pip install -e ".[dev]"`.',
+            answer='Install analysis dependencies with `python3 -m pip install -e ".[dev]"`.',
             evidence=[],
             tool_calls=[],
             confidence="low",
@@ -392,6 +416,14 @@ def _reading_to_dict(row: Reading) -> dict[str, Any]:
         "precipitation": row.precipitation,
         "wind_speed_10m": row.wind_speed_10m,
         "weather_code": row.weather_code,
+        "surface_pressure": row.surface_pressure,
+        "pressure_msl": row.pressure_msl,
+        "relative_humidity_2m": row.relative_humidity_2m,
+        "dew_point_2m": row.dew_point_2m,
+        "wind_gusts_10m": row.wind_gusts_10m,
+        "cloud_cover": row.cloud_cover,
+        "snowfall": row.snowfall,
+        "snow_depth": row.snow_depth,
     }
 
 
@@ -406,6 +438,15 @@ def _event_to_dict(row: Event) -> dict[str, Any]:
         "signal_values": row.signal_values,
         "reason": row.reason,
         "supporting_reading_ids": row.supporting_reading_ids,
+        "status": row.status,
+        "onset_ts": row.onset_ts.isoformat() if row.onset_ts else None,
+        "peak_ts": row.peak_ts.isoformat() if row.peak_ts else None,
+        "resolved_ts": row.resolved_ts.isoformat() if row.resolved_ts else None,
+        "priority_score": row.priority_score,
+        "confidence": row.confidence,
+        "detector_name": row.detector_name,
+        "dedupe_key": row.dedupe_key,
+        "evidence": row.evidence,
     }
 
 

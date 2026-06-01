@@ -839,9 +839,12 @@ def write_evaluation(
 - `raw_to_incident_collapse` is raw detector firings divided by lifecycle
   incidents. It is a deduplication win metric, but it blends instantaneous and
   sustained event types, so read it as an average collapse ratio.
-- Open-Meteo archive is observations-only, so forecast-bust archive counts are
-  zero unless the `--source db` mode has stored forecasts. Forecast-bust logic is
-  covered by unit and labeled tests.
+- Open-Meteo archive is observations-only. In `--source archive` replay,
+  `scripts/evaluate.py` has no historically issued forecast rows to pair with
+  observations, so `forecast_bust` is expected to show zero. The detector is
+  exercised by `tests/test_native_detectors.py::test_forecast_bust_fires_on_error_over_rolling_mae`,
+  by the labeled `forecast_bust_simple_mae` scenario, and by live/`--source db`
+  operation when stored forecasts exist.
 
 ## Labeled Scenario Results
 
@@ -861,8 +864,10 @@ Interpretation:
 
 - Heat/cold stress and warm/cold spell all fire across full seasons:
   heat_stress 45, cold_stress 30, warm_spell 63, cold_spell 60.
-- Forecast-bust is zero in archive mode because the Open-Meteo archive has no
-  stored forecasts; it remains covered by unit and labeled tests.
+- Forecast-bust is zero in archive mode because the Open-Meteo archive has
+  observations but not the forecasts issued at those historical times; it
+  remains covered by unit and labeled tests and is active in live DB operation
+  when stored forecasts exist.
 - Spatial anomaly compares each city in `z_hod` space against that city's own
   climatology first, then compares the standardized value to peers. A city must
   be anomalous in its own right and far from peer z-values; normal-for-Vancouver
@@ -911,7 +916,8 @@ Interpretation:
   rows directly. The native volume is lifecycle incidents because the feed now
   collapses persistent conditions.
 - Forecast-bust lead conditioning remains documented future work; this phase
-  keeps the simple global rolling MAE form.
+  keeps the simple global rolling MAE form. The archive replay zero is a data
+  availability artifact, not evidence that the detector threshold is broken.
 - Optional ECCC weak-label scoring was not run in this pass; the live pipeline
   remains Open-Meteo only.
 """

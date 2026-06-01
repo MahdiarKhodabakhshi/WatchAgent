@@ -8,5 +8,9 @@ No test in this codebase makes a real network call.
 - Tests that exercise `httpx` or `app/open_meteo.py` must use `respx`.
 - Per-test mock payloads live in `tests/fixtures/open_meteo_responses.py`.
 - Tests must clean up mocks between tests; use pytest fixtures instead of global monkeypatching.
+- Replay/evaluation tests must not call Open-Meteo. Use synthetic readings or the committed
+  climatology artifact. `scripts/evaluate.py` may fetch archive data only when manually run.
+- Forecast-bust tests should provide synthetic stored forecasts and comparison pairs rather than
+  relying on historical forecast APIs.
 
 Generated tests that import `requests`, monkeypatch `httpx.get`, or hit a real URL are incorrect.

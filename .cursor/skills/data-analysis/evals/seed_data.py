@@ -44,40 +44,37 @@ _PRECIP_PROFILES = {
 }
 
 _EVENTS_SPEC: list[dict] = [
-    # rapid_change: 4 Toronto, 2 Ottawa, 1 Vancouver = 7 total
-    {"city": "Toronto", "day": 1, "type": "rapid_change", "severity": "warning",
-     "metric": "temperature_2m"},
-    {"city": "Toronto", "day": 3, "type": "rapid_change", "severity": "severe",
-     "metric": "temperature_2m"},
-    {"city": "Toronto", "day": 5, "type": "rapid_change", "severity": "warning",
-     "metric": "wind_speed_10m"},
-    {"city": "Toronto", "day": 8, "type": "rapid_change", "severity": "warning",
-     "metric": "temperature_2m"},
-    {"city": "Ottawa", "day": 2, "type": "rapid_change", "severity": "warning",
-     "metric": "wind_speed_10m"},
-    {"city": "Ottawa", "day": 6, "type": "rapid_change", "severity": "severe",
-     "metric": "temperature_2m"},
-    {"city": "Vancouver", "day": 4, "type": "rapid_change", "severity": "warning",
-     "metric": "precipitation"},
-    # wmo_transition: 3 total
-    {"city": "Ottawa", "day": 3, "type": "wmo_transition", "severity": "warning",
-     "metric": "weather_code"},
-    {"city": "Toronto", "day": 7, "type": "wmo_transition", "severity": "severe",
-     "metric": "weather_code"},
-    {"city": "Vancouver", "day": 9, "type": "wmo_transition", "severity": "warning",
-     "metric": "weather_code"},
-    # comfort_divergence: 2 total
-    {"city": "Ottawa", "day": 5, "type": "comfort_divergence", "severity": "warning",
-     "metric": "apparent_temperature"},
-    {"city": "Toronto", "day": 9, "type": "comfort_divergence", "severity": "warning",
-     "metric": "apparent_temperature"},
-    # sustained_extreme: 2 total
-    {"city": "Vancouver", "day": 6, "type": "sustained_extreme", "severity": "warning",
-     "metric": "precipitation"},
-    {"city": "Ottawa", "day": 8, "type": "sustained_extreme", "severity": "severe",
-     "metric": "wind_speed_10m"},
+    # heavy_rain_burst: 4 Toronto, 1 Ottawa, 1 Vancouver = 6 total
+    {"city": "Toronto", "day": 1, "type": "heavy_rain_burst", "severity": "warning",
+     "metric": "precipitation", "score": 45.0},
+    {"city": "Toronto", "day": 3, "type": "heavy_rain_burst", "severity": "severe",
+     "metric": "precipitation", "score": 67.0},
+    {"city": "Toronto", "day": 5, "type": "heavy_rain_burst", "severity": "warning",
+     "metric": "precipitation", "score": 50.0},
+    {"city": "Toronto", "day": 8, "type": "heavy_rain_burst", "severity": "severe",
+     "metric": "precipitation", "score": 65.0},
+    {"city": "Ottawa", "day": 2, "type": "heavy_rain_burst", "severity": "warning",
+     "metric": "precipitation", "score": 44.0},
+    {"city": "Vancouver", "day": 4, "type": "heavy_rain_burst", "severity": "warning",
+     "metric": "precipitation", "score": 48.0},
+    {"city": "Ottawa", "day": 3, "type": "wind_gust_burst", "severity": "warning",
+     "metric": "wind_gusts_10m", "score": 46.0},
+    {"city": "Ottawa", "day": 6, "type": "wind_gust_burst", "severity": "severe",
+     "metric": "wind_gusts_10m", "score": 62.0},
+    {"city": "Vancouver", "day": 6, "type": "cold_spell", "severity": "warning",
+     "metric": "temperature_2m", "score": 50.0},
+    {"city": "Vancouver", "day": 9, "type": "cold_spell", "severity": "warning",
+     "metric": "temperature_2m", "score": 55.0},
+    {"city": "Toronto", "day": 9, "type": "heat_stress", "severity": "warning",
+     "metric": "humidex", "score": 45.0},
+    {"city": "Ottawa", "day": 5, "type": "spatial_anomaly", "severity": "warning",
+     "metric": "pressure_msl", "score": 42.0},
+    {"city": "Toronto", "day": 7, "type": "temperature_shock", "severity": "warning",
+     "metric": "temperature_2m", "score": 47.0},
+    {"city": "Ottawa", "day": 8, "type": "pressure_plunge", "severity": "warning",
+     "metric": "pressure_msl", "score": 51.0},
 ]
-# Total events: 14  |  severe: 3 (Toronto rapid d3, Ottawa rapid d6, Ottawa sustained d8)
+# Total events: 14 | severe: 3 (two Toronto heavy rain, one Ottawa wind gust)
 
 
 def build_seed_db(database_url: str = "sqlite://") -> sessionmaker[Session]:
@@ -113,6 +110,11 @@ def _insert_readings(session: Session) -> None:
                     precipitation=precips[day_idx],
                     wind_speed_10m=winds[day_idx],
                     weather_code=0,
+                    pressure_msl=1010.0 - day_idx,
+                    relative_humidity_2m=65.0,
+                    dew_point_2m=temps[day_idx] - 4.0,
+                    wind_gusts_10m=winds[day_idx] + 12.0,
+                    cloud_cover=60.0,
                 )
             )
             rid += 1
@@ -135,6 +137,15 @@ def _insert_events(session: Session) -> None:
                 signal_values={"seeded": True},
                 reason=f"Seed event {eid}: {spec['type']} in {spec['city']}.",
                 supporting_reading_ids=[],
+                status="resolved",
+                onset_ts=ts,
+                peak_ts=ts,
+                resolved_ts=ts + timedelta(hours=2),
+                priority_score=spec["score"],
+                confidence=0.9,
+                detector_name=spec["type"],
+                dedupe_key=f"{spec['city']}|{spec['type']}|{spec['metric']}",
+                evidence={"seeded": True},
             )
         )
         eid += 1

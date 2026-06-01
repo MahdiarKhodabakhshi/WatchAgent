@@ -1,20 +1,35 @@
 ---
-description: Required fields on every Event record emitted by the detection layer
+description: Required fields for detector candidates and stored lifecycle events
 alwaysApply: true
 ---
 
-Every `Event` instance produced anywhere in this codebase must include all of:
+Detector outputs are `EventCandidate` objects from `app/detection/base.py`. Stored feed rows are
+ORM `Event` objects from `app/models.py`. Do not blur the names: candidates are detector outputs;
+events are persisted lifecycle incidents.
+
+Every `EventCandidate` must include:
 
 - `city`: one of `Ottawa`, `Toronto`, `Vancouver`
 - `event_ts`: timezone-aware UTC datetime
-- `event_type`: one of the values listed in `app/detection/base.py`
-- `severity`: one of `info`, `warning`, `severe`
-- `signal_values`: dict containing the numeric inputs to the decision
-- `reason`: one-sentence human-readable explanation referencing the signal values
-- `supporting_reading_ids`: list of `Reading.id` integers that the event depends on
+- `event_type`: one of `app.detection.base.EVENT_TYPES`
+- `severity`: an initial hint only; stored severity is derived from `priority_score`
+- `metric`: metric name or `None`
+- `signal_values`: numeric inputs behind the decision
+- `reason`: one sentence that references those values
+- `supporting_reading_ids`: reading IDs used by the decision
+- `dedupe_key`: stable incident identity; it must not contain the current timestamp
+- `score_inputs`: normalized scoring signals such as rarity, magnitude, persistence, compound,
+  forecast surprise, spatial separation, and confidence
 
-If generated code constructs an Event without all of these fields, revise it.
+Stored `Event` rows must remain explainable and additive:
 
-The `reason` field must reference at least one numeric value from `signal_values`. Reasons like
-"unusual weather" are rejected; reasons like "Temperature 27.9C is 3.4 sigma above Toronto's
-24-hour mean of 22.4C" are correct.
+- Preserve existing API fields: `city`, `event_ts`, `created_at`, `event_type`, `severity`,
+  `metric`, `signal_values`, `reason`, and `supporting_reading_ids`.
+- Populate lifecycle/scoring fields where lifecycle is used: `status`, `onset_ts`, `peak_ts`,
+  `resolved_ts`, `priority_score`, `confidence`, `detector_name`, `dedupe_key`, and `evidence`.
+- `severity` must come from `app/detection/scoring.py::severity_from_score`.
+- `peak_ts` and `signal_values` must reflect the strongest candidate over the incident's life,
+  not merely the latest candidate.
+
+Reasons such as "unusual weather" are rejected. Reasons should be concrete, for example:
+"Toronto's rain accumulation reached 11.0 mm over 6h during a wet hour."

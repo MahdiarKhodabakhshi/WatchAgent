@@ -4,7 +4,7 @@
 Usage
 -----
     export ANTHROPIC_API_KEY=sk-...
-    python .cursor/skills/data-analysis/evals/run_evals.py
+    python3 .cursor/skills/data-analysis/evals/run_evals.py
 
 Requires an API key — **manual only, never in CI**.
 The seed DB is built in-memory; it never touches the real database.

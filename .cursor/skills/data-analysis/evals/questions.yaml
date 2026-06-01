@@ -8,7 +8,7 @@
 #   tolerance        – allowed numeric error (default 0.1)
 #   expect_tools     – tool_calls trace must include all listed tool names
 
-- q: "Which city had the most rapid_change events?"
+- q: "Which city had the most heavy_rain_burst incidents?"
   expect_contains: "Toronto"
   expect_tools: ["count_events_by_type", "query_events"]
 
@@ -34,7 +34,7 @@
   tolerance: 0.01
 
 - q: "Which event type is the most common?"
-  expect_contains: "rapid_change"
+  expect_contains: "heavy_rain_burst"
 
 - q: "Compare temperatures across all three cities. Which is warmest?"
   expect_contains: "Vancouver"

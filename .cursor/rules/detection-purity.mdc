@@ -1,14 +1,22 @@
 ---
-description: Purity contract for detection functions
-globs: "app/detection/**"
+description: Purity contract for WatchAgent detection functions
+globs: "app/detection/**,app/features.py"
 ---
 
-Functions in `app/detection/` must be pure:
+Detectors in `app/detection/` must be pure functions of `DetectorContext`:
 
-- Signature: `(reading: Reading, history: list[Reading], peers: dict[str, Reading] | None = None) -> list[Event]`.
-- No database access. No HTTP calls. No `datetime.now()`, no `time.time()`.
+- Target signature: `detect(ctx: DetectorContext) -> list[EventCandidate]`.
+- `DetectorContext` may include the current reading, recent history, latest peers, an optional
+  stored forecast, forecast comparison pairs, and the already-loaded climatology.
+- No database access.
+- No HTTP calls or Open-Meteo archive fetches.
+- No wall-clock reads such as `datetime.now()`, `datetime.utcnow()`, or `time.time()`.
 - No mutable module-level state. Constants and lookup tables are fine.
-- No `print()`. Detection should not produce side effects.
+- No `print()` or logging side effects from detectors.
 
-This contract exists so detection logic is deterministic and testable from a fixed sequence of
-readings. Any code suggestion that violates this contract must be revised.
+Feature functions in `app/features.py` must also be pure for a supplied reading/history/context.
+Loading the committed climatology artifact is allowed at module/runtime setup; per-reading feature
+calculation must not fetch network data.
+
+This contract keeps detection deterministic, replayable, and testable from a fixed sequence of
+readings. Any generated code that violates it must be revised.

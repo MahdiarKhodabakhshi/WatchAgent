@@ -5,6 +5,7 @@ globs: "app/poller.py,app/open_meteo.py"
 
 The poller must never raise out of its main loop. On any upstream failure:
 
+- Use Open-Meteo only. Do not add ECCC or other live providers to the poller path.
 - Log at WARNING level with structured fields: `city`, `http_status` if available, `attempt`,
   `next_retry_seconds`, and `trace_id`.
 - Retry with exponential backoff up to `max_retries` from `app/config.py`.

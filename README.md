@@ -1,84 +1,43 @@
 # WatchAgent
 
-WatchAgent is a Python 3.11+ service that polls Open-Meteo for Ottawa, Toronto, and Vancouver,
-deduplicates hourly readings, detects notable weather events, persists data in SQLite, and exposes a
-small HTTP API for health, readings, and events.
+WatchAgent is a Python 3.11+ service that polls Open-Meteo for Ottawa, Toronto, and
+Vancouver, deduplicates hourly readings, detects notable weather incidents, stores them in
+SQLite, and exposes a small FastAPI API plus a read-only dashboard.
 
-## What This Is
-
-Open-Meteo updates current observations hourly, but a service may poll more frequently for
-operational freshness. WatchAgent treats `(city, observation_ts)` as the identity of a reading, so
-repeated polls of the same upstream observation do not duplicate database rows or events.
-
-The event detector is the center of the project. It converts raw weather readings into explainable
-event records such as rapid changes, sustained extremes, WMO severity jumps, comfort divergence, and
-cross-city contrast. Every event contains the numeric signal values behind the decision plus a human
-readable reason.
-
-The `.cursor/` directory is included as a development-time artifact. It contains rules, one scoped
-agent, and two executable skills for data analysis and replaying detector behavior.
-
-## Architecture
-
-```text
-                                       +------------------------------+
-                                       |       Open-Meteo API         |
-                                       |  api.open-meteo.com/v1/...   |
-                                       +--------------+---------------+
-                                                      |
-                                                      | HTTPS
-                                                      v
-+-------------------------------------------------------------------------+
-|                       WatchAgent service (Docker)                       |
-|                                                                         |
-|   +----------------+                                                     |
-|   | Async Poller   |  fetch concurrently, retry with backoff             |
-|   | asyncio+httpx  |                                                     |
-|   +--------+-------+                                                     |
-|            | normalized reading                                          |
-|            v                                                            |
-|   +----------------+  unique(city, observation_ts)                       |
-|   | Storage        |                                                     |
-|   | SQLite+SQLA    |                                                     |
-|   +--------+-------+                                                     |
-|            | new reading + recent history                                |
-|            v                                                            |
-|   +----------------+  pure detect(reading, history, peers)               |
-|   | Event Detector |                                                     |
-|   +--------+-------+                                                     |
-|            | events                                                      |
-|            v                                                            |
-|   +----------------+                                                     |
-|   | Storage        |                                                     |
-|   +--------+-------+                                                     |
-|            |                                                            |
-|            v                                                            |
-|   +----------------+                                                     |
-|   | FastAPI        |  /health  /readings  /events                       |
-|   +----------------+                                                     |
-+-------------------------------------------------------------------------+
-
-                          .cursor/  development-time only
-```
+The project intentionally uses deterministic weather logic, not an LLM, for detection. The
+interesting part of the repo is the event-design layer: local-hour climatology, pure
+detectors, DB-backed lifecycle collapse, and replayable calibration evidence.
 
 ## Quickstart
 
+No API keys are required for the service. Open-Meteo is the only live weather provider, and
+the committed `app/data/climatology.json` artifact is loaded from disk at startup. The app
+does not fetch archive data during boot.
+
 ```bash
+git clone <repo-url>
+cd watchagent
 cp .env.example .env
 docker compose up --build
-curl http://localhost:8000/health
 ```
 
-The service starts a background poller by default. `ANTHROPIC_API_KEY` is not required for the
-service; it is only used by the offline data-analysis Cursor skill.
+In another shell:
 
-If port 8000 is already in use, set `HOST_PORT` in `.env` before starting Compose.
+```bash
+curl http://localhost:8000/health
+curl "http://localhost:8000/readings?limit=5"
+curl "http://localhost:8000/events?limit=5"
+```
 
-### Recreate a local dev database after schema changes
+`/readings` and `/events` may be empty on a fresh database until the poller stores its first
+Open-Meteo response, but the endpoints should respond without credentials. If port 8000 is
+already in use, set `HOST_PORT` in `.env` before starting Compose.
 
-This project does not use Alembic yet. Schema changes are additive in the SQLAlchemy models and a
-clean clone creates the right SQLite tables automatically. If you already have a local development
-database from an older schema, recreate it before running the app:
+### Recreate A Local Dev DB
+
+This repo does not use Alembic. Schema changes are additive in SQLAlchemy models, and a clean
+clone creates the right SQLite tables automatically. Existing local databases from an older
+schema should be recreated:
 
 ```bash
 docker compose down
@@ -86,46 +45,57 @@ rm -f data/watchagent.db data/watchagent.db-*
 docker compose up --build
 ```
 
-### Dashboard
+### Backfill For Local Testing
 
-The Docker image also builds a read-only React dashboard and serves it from the same FastAPI origin
-at `http://localhost:8000/`. The SPA consumes only the public `/health`, `/readings`, and `/events`
-endpoints with relative paths, so there is no CORS setup, API base URL, or frontend secret. It polls
-every 30 seconds with stale-while-revalidate caching and keeps city, time-window, event type, and
-severity filters in the URL.
-
-### Backfill with historical data (fast testing)
-
-If you want to exercise the detector on a large dataset without waiting for live polling, you can
-backfill the database from the Open-Meteo archive API (hourly data).
-
-Run this inside the running container:
+Backfill uses Open-Meteo archive data and writes to the local database. It does not use ECCC
+or credentials.
 
 ```bash
 docker compose exec api python -m app.backfill --days 90 --chunk-days 31
-curl http://localhost:8000/health
 curl "http://localhost:8000/events?limit=10"
 ```
 
-Tip: set `ENABLE_POLLER=false` in `.env` while backfilling to avoid mixing live readings with the
-historical load.
+Set `ENABLE_POLLER=false` in `.env` while backfilling if you want to avoid mixing live and
+historical readings.
 
-### Rebuild climatology artifact
+### Rebuild Climatology
 
-Runtime code loads the committed `app/data/climatology.json` artifact; it does not call Open-Meteo
-at startup. To refresh the 2021-2025 local-hour climatology from the Open-Meteo archive API:
+Runtime code loads the committed climatology artifact. To refresh it offline:
 
 ```bash
-python scripts/build_climatology.py --start-date 2021-01-01 --end-date 2025-12-31
+python3 scripts/build_climatology.py --start-date 2021-01-01 --end-date 2025-12-31
 ```
+
+## Architecture
+
+```text
+1. Ingest + storage
+   Open-Meteo current/forecast pulls and archive backfill -> SQLite readings/forecasts
+        |
+        v
+2. Feature + detector layer
+   local-hour climatology, MAD scales, pure DetectorContext -> EventCandidate detectors
+        |
+        v
+3. Lifecycle + scoring
+   stable dedupe keys, hysteresis, peak tracking, priority_score, severity from score
+        |
+        v
+4. Serving + replay
+   /health, /readings, /events, dashboard, Cursor skills, scripts/evaluate.py
+```
+
+Important boundaries:
+
+- Live pipeline uses Open-Meteo only.
+- Detectors are pure functions of `DetectorContext`; no DB, network, or clock reads.
+- `/health`, `/readings`, and `/events` contracts are additive.
+- Event lifecycle state is DB-backed in `incident_states`, so incidents survive poller
+  restarts.
 
 ## API
 
 ### `GET /health`
-
-```bash
-curl http://localhost:8000/health
-```
 
 ```json
 {
@@ -140,11 +110,8 @@ curl http://localhost:8000/health
 Query parameters:
 
 - `city`: optional, one of `Ottawa`, `Toronto`, `Vancouver`
+- `start`, `end`: optional timezone-aware datetimes
 - `limit`: optional, default `50`, max `500`
-
-```bash
-curl "http://localhost:8000/readings?city=Toronto&limit=10"
-```
 
 ```json
 {
@@ -158,27 +125,33 @@ curl "http://localhost:8000/readings?city=Toronto&limit=10"
       "apparent_temperature": 20.9,
       "precipitation": 0.0,
       "wind_speed_10m": 12.3,
-      "weather_code": 1
+      "weather_code": 1,
+      "surface_pressure": 1004.2,
+      "pressure_msl": 1011.8,
+      "relative_humidity_2m": 71,
+      "dew_point_2m": 16.2,
+      "wind_gusts_10m": 34.0,
+      "cloud_cover": 88,
+      "snowfall": 0.0,
+      "snow_depth": null
     }
   ]
 }
 ```
 
-The readings schema is additive. Enriched Open-Meteo fields such as `surface_pressure`,
-`pressure_msl`, `relative_humidity_2m`, `dew_point_2m`, `wind_gusts_10m`, `cloud_cover`,
-`snowfall`, and `snow_depth` are also returned when available, and are `null` when Open-Meteo omits
-them.
+Open-Meteo occasionally omits fields by city/hour/model. Enriched fields are nullable by
+design.
 
 ### `GET /events`
 
 Query parameters:
 
 - `city`: optional, one of `Ottawa`, `Toronto`, `Vancouver`
+- `start`, `end`: optional timezone-aware datetimes
 - `limit`: optional, default `50`, max `500`
 
-```bash
-curl "http://localhost:8000/events?city=Toronto&limit=10"
-```
+The feed sorts by `priority_score` first, then recency. Existing fields remain present, and
+lifecycle/scoring fields are additive.
 
 ```json
 {
@@ -186,225 +159,207 @@ curl "http://localhost:8000/events?city=Toronto&limit=10"
     {
       "id": 1,
       "city": "Toronto",
-      "event_ts": "2026-05-27T18:00:00Z",
-      "created_at": "2026-05-27T18:05:01Z",
-      "event_type": "rapid_change",
-      "severity": "warning",
-      "metric": "temperature_2m",
+      "event_ts": "2024-07-16T17:00:00Z",
+      "created_at": "2024-07-16T17:05:01Z",
+      "event_type": "heavy_rain_burst",
+      "severity": "severe",
+      "metric": "precipitation",
       "signal_values": {
-        "value": 27.9,
-        "mean": 22.4,
-        "std": 1.8,
-        "z_score": 3.1
+        "precipitation_mm": 4.4,
+        "accumulation_mm": 11.0,
+        "wet_hour_p95_mm": 10.0
       },
-      "reason": "temperature 2m 27.9 is 3.1 sigma from Toronto's 24h mean of 22.4.",
-      "supporting_reading_ids": [1, 2, 3]
+      "reason": "Toronto's rain accumulation reached 11.0 mm over 6h during a wet hour.",
+      "supporting_reading_ids": [101, 102, 103],
+      "status": "ongoing",
+      "onset_ts": "2024-07-16T17:00:00Z",
+      "peak_ts": "2024-07-16T17:00:00Z",
+      "resolved_ts": null,
+      "priority_score": 67.0,
+      "confidence": 0.95,
+      "dedupe_key": "Toronto|heavy_rain_burst|precipitation",
+      "evidence": {
+        "lifecycle": {
+          "peak_strength": 11.0,
+          "clear_count": 0
+        }
+      }
     }
   ]
 }
 ```
 
-## Event Detection
+## Event Design
 
-Raw readings are most useful when filtered into a stream of moments worth attention. WatchAgent's
-detection layer follows three rules.
+WatchAgent detects incidents, not one row per noisy trigger. A detector emits
+`EventCandidate` objects from a pure `DetectorContext`; lifecycle then opens, updates, or
+resolves one persistent `Event` per stable `dedupe_key`.
 
-**Per-city calibration.** Statistical detectors use each city's own rolling history, rather than a
-global hardcoded weather threshold. This matters because a 5C temperature swing has different meaning
-in Vancouver than in Ottawa.
+Scoring is centralized in `app/detection/scoring.py`. Each detector provides normalized
+score inputs such as rarity, magnitude, persistence, compound evidence, forecast surprise,
+spatial separation, and confidence. `priority_score` is a weighted 0-100 value, and stored
+`severity` is derived from score: `<30 info`, `30-59 warning`, `>=60 severe`.
 
-**Defensibility.** Every event includes `signal_values` and a `reason` string that references those
-numbers. The API should explain why an event fired without requiring a reviewer to inspect code.
+### Detector Catalog
 
-**Cold-start safety.** Statistical detectors wait until at least 12 historical readings are
-available. `wmo_transition` can run earlier because it compares categorical severity between the
-current and previous reading.
+| detector | phenomenon | statistic | initial threshold and calibration hypothesis |
+|---|---|---|---|
+| `temperature_shock` | Sudden temperature jumps that are unusual for that city and hour. | Local-hour `z_hod` plus a 3-hour temperature derivative. | `abs(z_hod) >= 3.0` and `abs(delta_3h) >= 5C`. This preserves the useful diurnal-aware baseline from the old rapid-change rule while filtering routine afternoon warming. |
+| `pressure_plunge` | Pressure falls that often precede stormy conditions. | 3-hour sea-level pressure fall, checked against local pressure behavior and confirmed by wind/gust rise. | At least a 6 hPa fall plus wind corroboration. Replay showed weaker falls were ordinary weather noise, so the threshold keeps only sharper, compound signals. |
+| `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod >= 3.0`. This replaces spammy `sustained_extreme`; 50,615 old raw firings became 123 warm/cold spell incidents. |
+| `cold_spell` | Persistent locally extreme cold. | Temperature `z_hod` below the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod <= -3.0`. The same spell hypothesis as warm spells, with score magnitude lifting extreme cold outbreaks to severe. |
+| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount at least `max(wet p95, 10 mm)`, or 6-hour accumulation at least 10 mm. The wet/dry split avoids zero-dominated medians; Toronto/Ottawa flood spot checks drove the accumulation scoring. |
+| `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | `z_hod >= 3.2` or gust around 90 km/h. The replay rate landed near other direct hazard detectors after raising the z threshold. |
+| `heat_stress` | Dangerous heat load from temperature plus moisture. | Humidex from temperature and dew point. | Humidex `>= 38`, with Humidex 40 as a strong anchor. Full-season replay produced non-trivial but not constant summer incidents. |
+| `cold_stress` | Dangerous wind chill from cold plus wind. | Wind Chill Index from temperature and wind speed. | Wind chill `<= -25` with valid cold/wind inputs. City-center archive data made `-30` effectively dead, so `-25` keeps real winter stress visible. |
+| `forecast_bust` | A live forecast miss large enough to matter operationally. | `abs(observed - stored_forecast) / max(global rolling MAE, metric_floor)`. | Normalized error `>= 2.5` with at least 3 recent obs/forecast comparison pairs. Archive replay has no historical forecast pairs, so this is exercised by unit/labeled tests and live DB operation. |
+| `spatial_anomaly` | One city is anomalous relative to its own climate and its peers. | Own-city `z_hod`, then gap from median peer `z_hod` across temperature, gust, and pressure. | Own `abs(z_hod) >= 3.0` and peer z-gap `>= 5.0`. This prevents "normal Vancouver mildness while Ottawa freezes" from counting as an event; geography alone is not a hazard. |
 
-The implemented event types are:
+`wmo_transition` is no longer a primary event. WMO weather-code tier changes are treated as
+supporting evidence where useful instead of a spammy feed item.
 
-1. `rapid_change`: fires when temperature, wind, or precipitation is at least 2.5 standard
-   deviations from the city's baseline. Severity becomes `severe` at 3.5 sigma.
-2. `sustained_extreme`: fires when the current reading and previous two readings are all in the
-   same 5th or 95th percentile tail.
-3. `wmo_transition`: fires when WMO weather code category jumps by at least two severity levels.
-4. `comfort_divergence`: fires when apparent temperature diverges from actual temperature beyond
-   the city's baseline mean gap plus two standard deviations.
-5. `cross_city_contrast`: fires when the current city-peer metric gap exceeds the 95th percentile
-   of recent comparable gaps and also clears a metric-specific minimum gap.
-6. `forecast_divergence`: fires when an observed reading diverges significantly from what was
-   forecast for that hour — either a temperature miss ≥ 6°C or a WMO weather code jump of ≥ 2
-   severity levels.
-7. `fun_fact`: low-stakes highlights for crossing the freezing line, apparent-temperature gaps
-   that make cities feel packed for different weather, and local 14-day warm or cold records.
+### Robust Statistics
 
-Fun facts are a deliberate separate layer: they always use severity `info`, keep event type
-`fun_fact`, are onset-gated like the operational detectors, and can be excluded from poller storage
-with `ENABLE_FUN_FACTS=false` without changing detection. They are never mixed into the alerting
-path.
+- **Median/MAD over mean/std**: weather tails are heavy and seasonal; one storm should not drag
+  the baseline the way a mean and standard deviation can.
+- **MAD floor**: `max(1.4826 * MAD, metric_epsilon)` prevents zero-variance buckets from
+  creating infinite z-scores.
+- **Local-hour buckets**: climatology is keyed by `(city, month, local_hour)` using each
+  city's timezone, avoiding UTC-smearing of the diurnal cycle.
+- **Precip occurrence vs amount**: dry hours are modeled separately from wet-hour amount
+  percentiles, so heavy rain is not compared to a zero-dominated median.
+- **Lifecycle hysteresis**: incidents open after enter criteria and resolve only after clear
+  criteria, which debounces borderline oscillation and preserves stable onset/peak times.
 
-### Detector contract migration
+### Confidence
 
-The target detector contract is `DetectorContext -> list[EventCandidate]`. During the incremental
-rewrite, `app.detection.base.Event` remains a compatibility alias for `EventCandidate`, and
-`registry.LegacyRuleAdapter` preserves the existing detector order and outputs. The new scoring and
-explanation helpers are pure and tested, but are not wired into stored severity or feed ordering
-until the lifecycle phase.
+Candidates carry a normalized confidence score. Confidence is lowered when the feature layer
+uses fallback baselines because a `(city, month, local_hour)` bucket is thin, when peer data is
+missing for spatial comparison, when forecast-bust lacks enough rolling MAE pairs, or when key
+weather variables are unavailable. Low confidence suppresses score rather than changing the API
+shape.
 
-### Lifecycle incidents
+### Evaluation Evidence
 
-Detector candidates now flow through a DB-backed lifecycle manager before storage. A stable
-`dedupe_key` built from city, event type, metric, and any relevant peer/kind identity collapses
-repeated candidates into one incident row with `status`, `onset_ts`, `peak_ts`, `resolved_ts`, and
-`priority_score`. Open incidents survive poller restarts because enter/clear counters live in the
-`incident_states` table. `/events` remains additive and sorts by `priority_score` first.
+The replayable evidence lives in [EVALUATION.md](EVALUATION.md):
 
-### Diurnal-aware baselines
+```bash
+python3 scripts/evaluate.py --source archive --start-date 2023-01-01 --end-date 2025-12-31
+```
 
-A 24-hour rolling mean treats 3pm the same as 3am. In cities with large diurnal temperature swings,
-this creates false positives every warm afternoon. `rapid_change` and `comfort_divergence` now
-prefer a **same-local-hour baseline**: 14 days of readings at the same local hour (±1h, via
-`zoneinfo`). If at least 7 same-hour samples exist, the detector uses that distribution; otherwise
-it falls back to the rolling 24-hour (or 48-hour) window. Over real backfill data, 98% of
-`rapid_change` events use the diurnal baseline (see [EVALUATION.md](EVALUATION.md)).
+Current 2023-2025 archive replay:
 
-### Forecast reconciliation
+- Legacy raw detector firings: **95,077**
+- Native lifecycle incidents: **753**
+- Overall rate: **0.229 incidents/city-day**
+- Raw-firing to incident collapse ratio: **4.27x** on native candidates
+- `sustained_extreme` replacement: **50,615 raw firings -> 123 spell incidents**
 
-During each poll, the poller fetches current conditions **and** hourly forecasts in a single
-Open-Meteo API call. Forecasts for the next 3–12 hours are stored in a `forecasts` table with a
-`UNIQUE(city, target_ts)` constraint — only the earliest lead-time forecast is kept per hour,
-preserving the most informative prediction. When a reading arrives, the poller looks up whether a
-forecast exists for that exact hour and, if so, passes it to the pure `detect_forecast_divergence`
-detector. The feature ships behind `ENABLE_FORECAST_RECONCILIATION` (default true) so it can be
-toggled off without code changes.
+Per-type after-state:
 
-The live and archive Open-Meteo pulls request the same enriched weather variables needed for later
-climatology: pressure, humidity, dew point, gusts, cloud cover, snowfall, and snow depth. The
-Open-Meteo Historical Weather API accepts those variables on `/v1/archive`; if any model response
-omits a variable for a city/hour, WatchAgent stores `null` rather than failing the poll or backfill.
+| detector_type | incidents | per_city_day |
+|---|---:|---:|
+| `temperature_shock` | 19 | 0.006 |
+| `pressure_plunge` | 35 | 0.011 |
+| `warm_spell` | 63 | 0.019 |
+| `cold_spell` | 60 | 0.018 |
+| `heavy_rain_burst` | 240 | 0.073 |
+| `wind_gust_burst` | 227 | 0.069 |
+| `heat_stress` | 45 | 0.014 |
+| `cold_stress` | 30 | 0.009 |
+| `forecast_bust` | 0 | 0.000 |
+| `spatial_anomaly` | 34 | 0.010 |
 
-Implementation note: the plan describes a full historical pairwise distribution for
-`cross_city_contrast`. The detector contract in the same plan passes only the triggering city's
-history plus the latest peer readings. I preserved that pure function contract and compute a rolling
-gap baseline from the triggering city's history against each latest peer value. I also added
-metric-specific minimum gaps to avoid noisy alerts when the historical distribution is flat.
+Forecast-bust is zero in archive replay because Open-Meteo archive provides observations, not
+the forecasts issued at the time. The detector fires in
+`tests/test_native_detectors.py::test_forecast_bust_fires_on_error_over_rolling_mae` and in the
+labeled `forecast_bust_simple_mae` scenario; live operation compares readings with stored
+forecast rows from the current/forecast pull.
 
-### Evaluation
+Known-event spot checks from the same replay:
 
-Detector quality is documented in [EVALUATION.md](EVALUATION.md). It covers:
+| documented event | date | incident |
+|---|---|---|
+| Toronto heavy rainfall/flooding | 2024-07-16 | `heavy_rain_burst / precipitation`, priority 67.0, severe |
+| Vancouver January deep freeze | 2024-01-12 | `cold_spell / temperature_2m`, priority 70.0, severe |
+| Ottawa severe thunderstorm/outages | 2023-06-26 | `heavy_rain_burst / precipitation`, priority 65.2, severe |
 
-- **Labeled scenarios**: 18 synthetic test cases with exact ground truth, yielding 100% precision
-  and recall. These run in CI as `tests/test_labeled_scenarios.py`.
-- **Characterization over backfill**: event rates, z-score distribution, diurnal baseline split,
-  and severity breakdown over ~90 days of real data. Honestly framed as characterization (no ground
-  truth), not accuracy claims.
+### Deliberately Out Of Scope
+
+- **EVT/GPD**: attractive for tail modeling, but too much calibration surface for this take-home.
+- **BOCPD, ADWIN, PELT**: change-point tools were cut to keep behavior explainable and testable
+  with hourly weather data.
+- **Isolation Forest**: would obscure why an event fired and require broader validation data.
+- **LSTM or other sequence models**: not justified for three cities, limited labels, and a
+  deterministic operational feed.
+- **Live ECCC alerts**: ECCC can be useful as offline weak labels, but the live pipeline remains
+  Open-Meteo only.
+- **Lead-conditioned forecast bust**: forecast storage still keeps one forecast per target time;
+  lead-binned forecast-error calibration is documented future work.
 
 ## Cursor Setup
 
-Rules live in `.cursor/rules/`:
+The `.cursor/` directory is a development-time artifact for reviewing and replaying the actual
+WatchAgent design.
 
-- `event-record-contract.mdc`: requires complete, explainable Event records.
-- `poller-failure-policy.mdc`: keeps the poller alive through upstream failures.
-- `detection-purity.mdc`: prevents I/O and clock access inside detection functions.
-- `time-handling.mdc`: requires timezone-aware UTC datetimes.
-- `test-mocking.mdc`: requires mocked upstream HTTP calls in tests.
+Rules:
 
-The custom agent is `.cursor/agents/event-logic-reviewer.md`. It reviews detector changes against
-edge cases such as empty history, zero standard deviation, cold-start boundaries, sensor anomalies,
-missing peers, and timezone-naive datetimes.
+- `.cursor/rules/detection-purity.mdc`: detectors are pure
+  `DetectorContext -> list[EventCandidate]` functions.
+- `.cursor/rules/event-record-contract.mdc`: candidates and stored events must remain
+  explainable, scored, and additive.
+- `.cursor/rules/poller-failure-policy.mdc`: the poller logs and continues through upstream
+  failures.
+- `.cursor/rules/time-handling.mdc`: all datetimes are timezone-aware UTC at storage/API
+  boundaries.
+- `.cursor/rules/test-mocking.mdc`: API-touching tests mock network calls.
 
-Skills live in `.cursor/skills/`:
+Agent:
 
-- `data-analysis`: answers natural-language questions about stored readings and events. Implements
-  three agentic design patterns:
-  - **Tool Use**: a bounded ReAct loop (≤ 6 steps) with deterministic SQLAlchemy tools.
-  - **Reflection**: a verification pass after the main loop checks every numeric claim against the
-    tool-result trace, returning corrections if any (1 extra LLM call, 7 max total).
-  - **Grounded NL digest** (`digest.py`): gathers facts deterministically from the DB, then has the
-    LLM render only those facts into prose. Both the prose and raw facts are returned for
-    verification.
-  - **Eval suite** (`evals/`): 8 questions graded against a fixed seed database with structural and
-    value checks (no LLM grading). Manual only — requires an API key, never in CI.
-- `replay-detection`: re-runs current detection logic over stored readings without writing to the
-  database.
+- `.cursor/agents/event-logic-reviewer.md`: reviews detector and lifecycle changes against
+  cold-start behavior, missing variables, confidence, dedupe keys, scoring inputs, and replay
+  evidence.
+
+Skills:
+
+- `.cursor/skills/data-analysis`: `python3 .cursor/skills/data-analysis/analyze.py "question"`
+  answers read-only questions against the local DB; `digest.py` produces grounded event briefs.
+- `.cursor/skills/replay-detection`: `python3 .cursor/skills/replay-detection/replay.py --limit 100`
+  replays current candidates and lifecycle state over stored readings without writing events.
+- `.cursor/skills/explain-event`: `python3 .cursor/skills/explain-event/explain.py --event-id 1`
+  prints the stored lifecycle, score, evidence, and related reading context for one event.
+
+The optional LLM-backed data-analysis skill requires `ANTHROPIC_API_KEY`. The WatchAgent
+service, tests, and Docker startup do not.
+
+## Development
+
+```bash
+python3 -m pip install -e ".[dev]"
+.venv/bin/pytest -q
+.venv/bin/ruff check app tests scripts
+npm --prefix frontend install
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+docker compose build
+```
+
+CI runs lint, tests, frontend checks, and Docker build. Tests that touch Open-Meteo use mocks;
+no credentials are committed or required.
 
 ## Tech Choices
 
-**Python 3.11+.** The challenge targets Python 3.11+. This implementation is tested locally with
-Python 3.12 and CI pins Python 3.11.
+- **FastAPI** for typed response models, async lifespan hooks, and generated `/docs`.
+- **httpx + asyncio** for concurrent Open-Meteo polling with retry/backoff.
+- **SQLite + SQLAlchemy** because three cities and hourly readings do not need distributed
+  infrastructure.
+- **React dashboard** served from the same FastAPI origin, avoiding CORS and frontend secrets.
+- **structlog** for JSON logs with poll-cycle trace IDs.
+- **pytest + respx** for deterministic storage, API, and Open-Meteo tests.
 
-**FastAPI.** FastAPI gives typed response models, async lifespan hooks for the poller, and generated
-OpenAPI docs at `/docs`.
+## Future Work
 
-**httpx.** The poller uses one async `httpx.AsyncClient` per loop for connection reuse and
-concurrent city fetches.
-
-**SQLite + SQLAlchemy.** SQLite is the right scale for three cities and hourly upstream updates. It
-keeps deployment simple and persists through a Docker volume. SQLAlchemy provides models, sessions,
-constraints, and a clear path to Postgres if write volume grows.
-
-**asyncio scheduling.** A dedicated `asyncio.create_task()` starts inside the FastAPI lifespan. This
-is enough for a single polling loop and avoids Celery, Redis, or APScheduler complexity.
-
-**structlog.** Logs are structured JSON with a `trace_id` per poll cycle.
-
-**pytest + respx.** Tests cover deduplication, Open-Meteo parsing, event detection, and API shape.
-`respx` prevents real network calls in tests.
-
-## Implementation Notes
-
-Two pragmatic additions differ from the literal plan:
-
-- `ENABLE_POLLER` in `.env.example` defaults to `true`, but tests set it to `false` so FastAPI can
-  start without live Open-Meteo calls.
-- The Docker builder stage copies `app/` before `pip install .` because Python package installation
-  needs package files present. The plan's shorter snippet copied only `pyproject.toml`.
-- Compose uses `${HOST_PORT:-8000}:8000` so the default matches the plan while still allowing local
-  smoke tests on another port when 8000 is occupied.
-
-## Tests
-
-```bash
-pip install -e ".[dev]"
-pytest -q
-ruff check app tests
-```
-
-CI runs the same lint and test commands, then validates `docker build`.
-
-## Design Decisions & What I Deliberately Didn't Build
-
-**Deterministic detection over LLM detection.** The detectors are pure functions with no LLM in the
-loop. This makes every event reproducible, testable, and explainable without API costs or latency.
-The LLM is reserved for the data-analysis skill where natural-language flexibility adds value and
-the grounded-generation pattern prevents hallucination.
-
-**No multi-agent runtime.** A single-agent ReAct loop with bounded steps (6 + 1 reflection) is
-sufficient for the data-analysis use case. Multi-agent orchestration would add complexity without
-improving answer quality for the bounded set of SQL-backed tools.
-
-**No RAG.** The data lives in a structured SQLite database, not a document corpus. SQL queries over
-typed columns are more precise than embedding-based retrieval for questions like "max temperature
-in Vancouver." RAG would be appropriate if the system needed to search unstructured text, but that
-is not the case here.
-
-**Feature-flag forecasting.** Forecast reconciliation is gated behind
-`ENABLE_FORECAST_RECONCILIATION` rather than hard-coded. This lets operators disable it without a
-code change — useful during initial deployment or if the forecast API becomes unreliable. The
-forecasts table uses a `UNIQUE(city, target_ts)` constraint with an earliest-lead-wins policy so
-the most informative forecast is always the one compared against reality.
-
-**No new columns on existing tables.** The `forecasts` table is new, but `readings` and `events`
-are unchanged. This avoids the need for schema migrations on a deployed database, since the project
-does not include Alembic.
-
-**Honest evaluation framing.** `EVALUATION.md` separates ground-truthed labeled scenarios (exact
-precision/recall) from backfill characterization (event rates with no ground truth). Claiming
-accuracy on unlabeled data would be misleading; the split makes the distinction explicit.
-
-## Things I Would Do With More Time
-
-- Add Alembic migrations once the schema evolves beyond the initial two tables.
-- Add an endpoint for aggregate event counts by city and type.
-- Store richer peer history for exact pairwise cross-city distributions.
-- Add a small seed-data command for local demos.
-- Add a CI smoke test that starts the container and calls `/health`.
+- Add Alembic once schema evolution needs non-additive migrations.
+- Add CI smoke coverage that starts the container and calls `/health`.
+- Add lead-binned forecast-bust calibration once historical forecast pairs are available.
+- Add an aggregate `/event-counts` endpoint for dashboard filtering.

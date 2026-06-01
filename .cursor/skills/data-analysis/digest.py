@@ -13,8 +13,8 @@ every claim in the briefing.
 Usage
 -----
     export ANTHROPIC_API_KEY=sk-...
-    python .cursor/skills/data-analysis/digest.py              # last 24h
-    python .cursor/skills/data-analysis/digest.py --hours 48   # last 48h
+    python3 .cursor/skills/data-analysis/digest.py              # last 24h
+    python3 .cursor/skills/data-analysis/digest.py --hours 48   # last 48h
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import desc, func, select  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
@@ -41,7 +41,8 @@ MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
 DIGEST_SYSTEM_PROMPT = (
     "Write a concise weather-operations briefing using ONLY the facts provided. "
-    "Do not invent numbers. Reference specific counts, cities, and event types. "
+    "Do not invent numbers. Reference specific counts, cities, event types, "
+    "status, and priority_score when useful. "
     "4-6 sentences."
 )
 
@@ -89,7 +90,7 @@ def render_digest(facts: dict[str, Any]) -> str:
     try:
         import anthropic
     except ImportError:
-        return 'Install dependencies with `pip install -e ".[dev]"`.'
+        return 'Install dependencies with `python3 -m pip install -e ".[dev]"`.'
 
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
@@ -169,7 +170,7 @@ def _notable_events(
         select(Event)
         .where(Event.event_ts >= cutoff)
         .order_by(
-            Event.severity.desc(),
+            desc(Event.priority_score).nulls_last(),
             Event.event_ts.desc(),
         )
         .limit(limit)
@@ -179,8 +180,14 @@ def _notable_events(
             "city": e.city,
             "event_type": e.event_type,
             "severity": e.severity,
+            "status": e.status,
+            "priority_score": e.priority_score,
             "event_ts": e.event_ts.isoformat(),
+            "onset_ts": e.onset_ts.isoformat() if e.onset_ts else None,
+            "peak_ts": e.peak_ts.isoformat() if e.peak_ts else None,
+            "resolved_ts": e.resolved_ts.isoformat() if e.resolved_ts else None,
             "reason": e.reason,
+            "dedupe_key": e.dedupe_key,
         }
         for e in rows
     ]
@@ -203,6 +210,10 @@ def _latest_reading_summary(session: Session) -> dict[str, dict[str, Any]]:
                 "apparent_temperature": r.apparent_temperature,
                 "precipitation": r.precipitation,
                 "wind_speed_10m": r.wind_speed_10m,
+                "pressure_msl": r.pressure_msl,
+                "relative_humidity_2m": r.relative_humidity_2m,
+                "dew_point_2m": r.dew_point_2m,
+                "wind_gusts_10m": r.wind_gusts_10m,
             }
     return summary
 
