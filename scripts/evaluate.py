@@ -770,13 +770,14 @@ def calibration_changes_table() -> str:
         "empirical pressure-fall percentile over replay history rather than a "
         "shared z gate. |",
         "| heavy_rain_burst | wet-hour p95/floor -> wet-hour 99.5th training "
-        "amount quantile; dry-hour hurdle unchanged | "
-        "Rain uses the upper tail of wet amounts only, not zero-dominated "
-        "precipitation residuals. |",
+        "amount quantile plus 10 mm hazard floor; dry-hour hurdle and 6h "
+        "accumulation anchor unchanged | Rain uses the upper tail of wet "
+        "amounts only, but flood-style bursts still need an absolute hazard "
+        "floor when the city wet-hour distribution is compressed. |",
         "| wind_gust_burst | fixed gust z 3.2 -> wind-gust residual 99.5th "
         "training quantile; 90 km/h anchor unchanged | "
-        "Gusts are upper-tail hazards, so the gate is metric-specific and "
-        "one-sided. |",
+        "Gusts are upper-tail hazards, and the absolute ECCC-scale anchor "
+        "still fires even when local z is below the empirical quantile. |",
         "| heat_stress | unchanged in DS-2 | This detector is formula-threshold based, not a "
         "`z_hod >= 3` gate. |",
         "| cold_stress | unchanged in DS-2 | This detector is formula-threshold based, not a "
@@ -919,6 +920,41 @@ def _climatology_training_summary() -> str:
     return f"{source}, trained on {start}..{end}"
 
 
+def _empirical_threshold_summary() -> str:
+    try:
+        artifact = json.loads(CLIMATOLOGY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "training threshold contrast unavailable"
+    metrics = artifact.get("empirical_thresholds", {}).get("metrics", {})
+    if not isinstance(metrics, dict):
+        return "training threshold contrast unavailable"
+
+    temperature = metrics.get("temperature_2m", {})
+    gust = metrics.get("wind_gusts_10m", {})
+    rain = metrics.get("precipitation", {})
+    temp_upper = _threshold_value(temperature, "upper_z")
+    temp_lower = _threshold_value(temperature, "lower_z")
+    gust_upper = _threshold_value(gust, "upper_z")
+    rain_amount = _threshold_value(rain, "wet_amount_mm")
+    if None in (temp_upper, temp_lower, gust_upper, rain_amount):
+        return "training threshold contrast unavailable"
+
+    return (
+        "Per-metric z-equivalent thresholds expose why the uniform z=3 gate was "
+        f"too blunt: temperature tails are {temp_upper:.2f}/{temp_lower:.2f} z, "
+        f"while gusts require {gust_upper:.2f} z. Rain's wet-hour 99.5th "
+        f"percentile is {rain_amount:.1f} mm/h, below the 10 mm hazard floor, "
+        "so the hazard detector gates on the stricter floor."
+    )
+
+
+def _threshold_value(stats: object, key: str) -> float | None:
+    if not isinstance(stats, dict):
+        return None
+    value = stats.get(key)
+    return None if value is None else float(value)
+
+
 def _native_interpretation(replay: NativeReplay) -> str:
     counts = Counter(event.event_type for event in replay.incidents)
     total = len(replay.incidents)
@@ -993,6 +1029,7 @@ def write_evaluation(
   from that same committed artifact: 99.5th percentile upper tails, 0.5th
   percentile lower tails, and wet-hour-only 99.5th percentile rain amount.
   The quantile level is a fixed rare-tail hypothesis, not tuned to replay rates.
+- {_empirical_threshold_summary()}
 - Readings replayed: **{data.total_readings}** across **{data.total_city_days}**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,

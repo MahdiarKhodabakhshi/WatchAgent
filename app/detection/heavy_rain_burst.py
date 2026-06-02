@@ -37,7 +37,10 @@ class HeavyRainBurstDetector:
         if not precip.is_wet:
             return []
 
-        hourly_threshold, threshold_source = _hourly_threshold(climatology, precip)
+        hourly_threshold, wet_quantile, threshold_source = _hourly_threshold(
+            climatology,
+            precip,
+        )
         if hourly_threshold is None:
             return []
 
@@ -55,7 +58,8 @@ class HeavyRainBurstDetector:
             "wet_hour_p95_mm": None
             if precip.wet_amount_percentiles.get(95) is None
             else round(precip.wet_amount_percentiles[95], 3),
-            "wet_hour_quantile_mm": round(hourly_threshold, 3),
+            "wet_hour_quantile_mm": None if wet_quantile is None else round(wet_quantile, 3),
+            "absolute_hazard_floor_mm": MIN_HEAVY_RAIN_MM,
             "threshold_mm": round(hourly_threshold, 3),
             "threshold_source": threshold_source,
             "threshold_quantile": climatology.empirical_upper_quantile,
@@ -109,13 +113,17 @@ def _recent_accumulation_mm(ctx: DetectorContext) -> float:
     return total
 
 
-def _hourly_threshold(climatology, precip) -> tuple[float | None, str]:
+def _hourly_threshold(climatology, precip) -> tuple[float | None, float | None, str]:
     if USE_EMPIRICAL_QUANTILE_GATES:
         threshold = climatology.empirical_wet_amount_threshold()
         if threshold is not None:
-            return threshold, "training_wet_hour_upper_quantile"
+            return (
+                max(threshold, MIN_HEAVY_RAIN_MM),
+                threshold,
+                "training_wet_hour_upper_quantile_with_hazard_floor",
+            )
     p95 = precip.wet_amount_percentiles.get(95)
     if p95 is None:
-        return None, "missing_wet_percentile"
+        return None, None, "missing_wet_percentile"
     source = "fixed_wet_p95_floor" if not USE_EMPIRICAL_QUANTILE_GATES else "fixed_wet_p95_fallback"
-    return max(p95, MIN_HEAVY_RAIN_MM), source
+    return max(p95, MIN_HEAVY_RAIN_MM), p95, source

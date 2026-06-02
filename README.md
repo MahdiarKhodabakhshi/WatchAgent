@@ -175,7 +175,9 @@ lifecycle/scoring fields are additive.
         "amount_mm": 4.4,
         "accumulation_mm": 11.0,
         "wet_hour_quantile_mm": 5.0,
-        "threshold_source": "training_wet_hour_upper_quantile"
+        "absolute_hazard_floor_mm": 10.0,
+        "threshold_mm": 10.0,
+        "threshold_source": "training_wet_hour_upper_quantile_with_hazard_floor"
       },
       "reason": "Toronto's rain accumulation reached 11.0 mm over 6h during a wet hour.",
       "supporting_reading_ids": [101, 102, 103],
@@ -216,8 +218,8 @@ spatial separation, and confidence. `priority_score` is a weighted 0-100 value, 
 | `pressure_plunge` | Pressure falls that often precede stormy conditions. | 3-hour sea-level pressure fall, checked against local pressure behavior and confirmed by wind/gust rise. | At least a 6 hPa fall plus wind corroboration. Replay showed weaker falls were ordinary weather noise, so the threshold keeps only sharper, compound signals. |
 | `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the local-hour climatology, collapsed by lifecycle hysteresis. | Temperature residual above the empirical 99.5th training tail (`+2.79 z`). This replaces spammy `sustained_extreme`; in the 2022-2025 test replay, 67,513 old raw firings became 204 warm/cold spell incidents. |
 | `cold_spell` | Persistent locally extreme cold. | Temperature `z_hod` below the local-hour climatology, collapsed by lifecycle hysteresis. | Temperature residual below the empirical 0.5th training tail (`-2.94 z`). The same rare-tail spell hypothesis as warm spells, with score magnitude lifting extreme cold outbreaks to severe. |
-| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount above the training wet-hour 99.5th percentile (`5.0 mm` in the artifact), or 6-hour accumulation at least `max(wet-tail threshold, 10 mm)`. The wet/dry split avoids zero-dominated medians; the quantile is fixed before replay, not tuned to hit a rate. |
-| `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | Gust residual above the empirical 99.5th training tail (`+4.06 z`) or gust around 90 km/h. Gusts are one-sided upper-tail hazards. |
+| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount at least `max(training wet-hour 99.5th percentile, 10 mm)` or 6-hour accumulation at least the same 10 mm anchor. The artifact's wet-hour 99.5th percentile is only `5.0 mm`, so the absolute hazard floor prevents compressed wet-hour distributions from turning moderate rain into flood-style incidents. |
+| `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | Gust residual above the empirical 99.5th training tail (`+4.06 z`) or gust around 90 km/h. The ECCC-scale absolute anchor remains an OR gate so dangerous gusts fire regardless of local z. |
 | `heat_stress` | Dangerous heat load from temperature plus moisture. | Humidex from temperature and dew point. | Humidex `>= 38`, with Humidex 40 as a strong anchor. Full-season replay produced non-trivial but not constant summer incidents. |
 | `cold_stress` | Dangerous wind chill from cold plus wind. | Wind Chill Index from temperature and wind speed. | Wind chill `<= -25` with valid cold/wind inputs. City-center archive data made `-30` effectively dead, so `-25` keeps real winter stress visible. |
 | `forecast_bust` | A live forecast miss large enough to matter operationally. | `abs(observed - stored_forecast) / max(global rolling MAE, metric_floor)`. | Normalized error `>= 2.5` with at least 3 recent obs/forecast comparison pairs. Archive replay has no historical forecast pairs, so this is exercised by unit/labeled tests and live DB operation. |
@@ -236,7 +238,12 @@ supporting evidence where useful instead of a spammy feed item.
   city's timezone, avoiding UTC-smearing of the diurnal cycle.
 - **Empirical tail gates**: z-scores remain diagnostic, but z-gated detectors enter on
   per-metric training quantiles. The shared `z=3` rule is retired because each metric's
-  residual distribution has its own asymmetry and tail width.
+  residual distribution has its own asymmetry and tail width: the current training artifact
+  puts temperature tails near `+2.79/-2.94 z`, while gusts require `+4.06 z`.
+- **Anomaly vs hazard floors**: pure anomaly detectors (`temperature_shock`, spells, spatial)
+  use distributional quantiles only. Hazard detectors keep absolute operational floors as
+  well, for example `heavy_rain_burst` uses `max(wet-hour quantile, 10 mm)` and
+  `wind_gust_burst` keeps the 90 km/h ECCC-scale anchor.
 - **Precip occurrence vs amount**: dry hours are modeled separately from wet-hour amount
   percentiles, so heavy rain is not compared to a zero-dominated median.
 - **Lifecycle hysteresis**: incidents open after enter criteria and resolve only after clear
@@ -265,9 +272,9 @@ read from the training artifact only: upper 99.5th tails, lower 0.5th tails, and
 hit an event-rate target.
 
 - Legacy raw detector firings: **127,164**
-- Native lifecycle incidents: **1,001**
-- Overall rate: **0.228 incidents/city-day**
-- Raw-firing to incident collapse ratio: **4.42x** on native candidates
+- Native lifecycle incidents: **959**
+- Overall rate: **0.219 incidents/city-day**
+- Raw-firing to incident collapse ratio: **4.53x** on native candidates
 - `sustained_extreme` replacement: **67,513 raw firings -> 204 spell incidents**
 
 Per-type after-state:
@@ -278,7 +285,7 @@ Per-type after-state:
 | `pressure_plunge` | 52 | 0.012 |
 | `warm_spell` | 127 | 0.029 |
 | `cold_spell` | 77 | 0.018 |
-| `heavy_rain_burst` | 375 | 0.086 |
+| `heavy_rain_burst` | 333 | 0.076 |
 | `wind_gust_burst` | 132 | 0.030 |
 | `heat_stress` | 53 | 0.012 |
 | `cold_stress` | 70 | 0.016 |

@@ -133,7 +133,11 @@ def test_heavy_rain_burst_fires_on_wet_hour_amount() -> None:
     assert events[0].event_type == "heavy_rain_burst"
     assert events[0].severity == "severe"
     assert events[0].signal_values["amount_mm"] == 12.0
+    assert events[0].signal_values["wet_hour_quantile_mm"] == 5.0
     assert events[0].signal_values["threshold_mm"] == 10.0
+    assert events[0].signal_values["threshold_source"] == (
+        "training_wet_hour_upper_quantile_with_hazard_floor"
+    )
 
 
 def test_heavy_rain_burst_fires_on_short_window_accumulation() -> None:
@@ -500,7 +504,7 @@ def _mini_climatology() -> dict:
                 },
                 "precipitation": {
                     "wet_count": 100,
-                    "wet_amount_mm": 10.0,
+                    "wet_amount_mm": 5.0,
                 },
             },
         },
