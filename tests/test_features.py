@@ -17,7 +17,7 @@ def test_default_climatology_artifact_loads() -> None:
         "start": "2015-01-01",
         "end": "2021-12-31",
     }
-    assert z.bucket == "hod"
+    assert z.bucket == "smooth_hod"
     assert z.n >= 100
     assert z.scale is not None
     assert z.scale > 0
@@ -37,6 +37,17 @@ def test_z_hod_uses_local_month_hour_and_floors_zero_mad() -> None:
     assert z.scale == 0.5
     assert z.z == 2.0
     assert z.confidence == 1.0
+
+
+def test_z_hod_prefers_smooth_local_day_hour_bucket() -> None:
+    climatology = Climatology(_mini_smooth_climatology())
+
+    z = climatology.z_hod("Toronto", "temperature_2m", 21.0, BASE_TS)
+
+    assert z.bucket == "smooth_hod"
+    assert z.median == 19.0
+    assert z.scale == 1.0
+    assert z.z == 2.0
 
 
 def test_z_hod_falls_back_to_month_then_city_with_lower_confidence() -> None:
@@ -219,3 +230,37 @@ def _mini_climatology() -> dict:
             },
         },
     }
+
+
+def _mini_smooth_climatology() -> dict:
+    data = _mini_climatology()
+    data["baseline"] = {
+        "method": "day_of_year_smoothing_window",
+        "smooth_window_days": 15,
+    }
+    data["smooth_buckets"] = {
+        "Toronto": {
+            "152": {
+                "12": {
+                    "temperature_2m": {
+                        "n": 210,
+                        "median": 19.0,
+                        "mad": 1.0 / 1.4826,
+                        "scale": 1.0,
+                    }
+                }
+            }
+        }
+    }
+    data["precipitation"]["smooth_buckets"] = {
+        "Toronto": {
+            "152": {
+                "12": {
+                    "total_count": 210,
+                    "wet_count": 40,
+                    "percentiles": {"50": 0.9, "95": 2.7},
+                }
+            }
+        }
+    }
+    return data

@@ -59,6 +59,7 @@ from app.detection.rules import (  # noqa: E402
     detect_wmo_transition,
 )
 from app.detection.timeofday import local_hour  # noqa: E402
+from app.features import Climatology  # noqa: E402
 from app.models import Forecast, Reading  # noqa: E402
 from app.open_meteo import CITIES, CITY_NAMES, fetch_city_hourly_history  # noqa: E402
 from tests.labeled_scenarios import SCENARIOS  # noqa: E402
@@ -142,6 +143,8 @@ KNOWN_EVENT_SPOT_CHECKS = [
 @dataclass(frozen=True)
 class CalibrationProfile:
     name: str
+    baseline_variant: str
+    threshold_variant: str
     use_empirical_quantile_gates: bool
     temperature_shock_z: float
     temperature_shock_delta_c: float
@@ -161,9 +164,11 @@ class CalibrationProfile:
     spatial_min_own_z: float
 
 
-DS1_Z_GATE_PROFILE = CalibrationProfile(
-    name="DS-1 z-gated thresholds",
-    use_empirical_quantile_gates=False,
+DS2_MONTH_HOUR_PROFILE = CalibrationProfile(
+    name="DS-2 month-hour quantile baseline",
+    baseline_variant="legacy",
+    threshold_variant="legacy",
+    use_empirical_quantile_gates=True,
     temperature_shock_z=3.0,
     temperature_shock_delta_c=5.0,
     spell_z=3.0,
@@ -439,6 +444,7 @@ def replay_native(
     raw: list[tuple[Reading, EventCandidate]] = []
     states: dict[str, _IncidentState] = {}
     incidents: list[IncidentRecord] = []
+    climatology = _climatology_for_profile(profile)
     with _patched_profile(profile):
         for city, readings in data.readings_by_city.items():
             print(f"Native replay ({profile.name}): {city}", flush=True)
@@ -451,11 +457,21 @@ def replay_native(
                     history=history,
                     peers=peers,
                     forecast=forecast,
+                    climatology=climatology,
                 )
                 candidates = detect_candidates(ctx)
                 raw.extend((reading, candidate) for candidate in candidates)
                 incidents.extend(_collapse_candidates(states, candidates, reading))
     return NativeReplay(raw=raw, incidents=incidents)
+
+
+def _climatology_for_profile(profile: CalibrationProfile) -> Climatology:
+    artifact = json.loads(CLIMATOLOGY_PATH.read_text())
+    return Climatology(
+        artifact,
+        baseline_variant=profile.baseline_variant,
+        threshold_variant=profile.threshold_variant,
+    )
 
 
 def _collapse_candidates(
@@ -589,7 +605,9 @@ def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
 
 def current_profile() -> CalibrationProfile:
     return CalibrationProfile(
-        name="DS-2 empirical quantile gates",
+        name="DS-3 smooth quantile baseline",
+        baseline_variant="smooth",
+        threshold_variant="smooth",
         use_empirical_quantile_gates=True,
         temperature_shock_z=temp_module.TEMPERATURE_SHOCK_Z,
         temperature_shock_delta_c=temp_module.TEMPERATURE_SHOCK_DELTA_C,
@@ -758,38 +776,38 @@ def calibration_changes_table() -> str:
     rows = [
         "| detector | change | rationale |",
         "|---|---|---|",
-        "| temperature_shock | fixed `abs(z_hod) >= 3.0` -> temperature residual "
-        "99.5/0.5 training quantiles; delta remains 5C | "
-        "The same rare-tail concept is now read from temperature's own "
-        "training residual distribution. |",
-        "| warm/cold spell | fixed `z_hod` +/-3.0 -> temperature residual "
-        "99.5/0.5 training quantiles | "
-        "Warm and cold persistence gates use separate signed tails instead of "
-        "assuming symmetric z behavior. |",
-        "| pressure_plunge | unchanged in DS-2 | It already uses an "
+        "| climatology baseline | month/local-hour buckets -> local "
+        "day-of-year smoothing window at the same local hour | The baseline "
+        "uses more neighboring-season data while preserving the diurnal cycle. |",
+        "| empirical thresholds | recomputed on smooth training residuals | "
+        "DS-2 quantiles are not reused after the baseline changes; thresholds "
+        "remain train-only and leak-free. |",
+        "| temperature_shock | quantile gate structure unchanged; smooth residuals "
+        "replace month-hour residuals | Pure anomaly detector remains "
+        "distributional, with z retained as a diagnostic. |",
+        "| warm/cold spell | quantile gate structure unchanged; smooth residuals "
+        "replace month-hour residuals | Persistent temperature tails are now "
+        "measured against a continuous seasonal baseline. |",
+        "| pressure_plunge | unchanged in DS-3 | It already uses an "
         "empirical pressure-fall percentile over replay history rather than a "
         "shared z gate. |",
-        "| heavy_rain_burst | wet-hour p95/floor -> wet-hour 99.5th training "
-        "amount quantile plus 10 mm hazard floor; dry-hour hurdle and 6h "
-        "accumulation anchor unchanged | Rain uses the upper tail of wet "
-        "amounts only, but flood-style bursts still need an absolute hazard "
-        "floor when the city wet-hour distribution is compressed. |",
-        "| wind_gust_burst | fixed gust z 3.2 -> wind-gust residual 99.5th "
-        "training quantile; 90 km/h anchor unchanged | "
-        "Gusts are upper-tail hazards, and the absolute ECCC-scale anchor "
-        "still fires even when local z is below the empirical quantile. |",
-        "| heat_stress | unchanged in DS-2 | This detector is formula-threshold based, not a "
+        "| heavy_rain_burst | smooth wet-hour baselines plus 10 mm hazard floor; "
+        "dry-hour hurdle and 6h accumulation anchor unchanged | Rain keeps the "
+        "anomaly-vs-hazard-floor split from the DS-2 correction. |",
+        "| wind_gust_burst | smooth gust residual quantile; 90 km/h anchor "
+        "unchanged | Gusts stay one-sided upper-tail hazards with an absolute "
+        "danger anchor. |",
+        "| heat_stress | unchanged in DS-3 | This detector is formula-threshold based, not a "
         "`z_hod >= 3` gate. |",
-        "| cold_stress | unchanged in DS-2 | This detector is formula-threshold based, not a "
+        "| cold_stress | unchanged in DS-3 | This detector is formula-threshold based, not a "
         "`z_hod >= 3` gate. |",
-        "| forecast_bust | unchanged in DS-2 | Archive replay still lacks historical forecast "
+        "| forecast_bust | unchanged in DS-3 | Archive replay still lacks historical forecast "
         "pairs. |",
-        "| spatial_anomaly | fixed own `|z_hod| >= 3.0` -> metric residual "
-        "training quantiles; peer z-gap remains 5.0 | "
-        "The city must be anomalous in its own metric-specific tail before "
-        "peer comparison; wind-gust spatial checks are upper-tail only. |",
+        "| spatial_anomaly | own-anomaly quantile gate now uses smooth residuals; "
+        "peer z-gap remains 5.0 | The city must still be anomalous in its own "
+        "metric-specific tail before peer comparison. |",
         "| scoring weights | unchanged | "
-        "DS-2 changes entry gates only; score histograms are deferred to DS-4. |",
+        "DS-3 changes the baseline only; score histograms are deferred to DS-4. |",
     ]
     return "\n".join(rows)
 
@@ -948,6 +966,37 @@ def _empirical_threshold_summary() -> str:
     )
 
 
+def boundary_continuity_table() -> str:
+    try:
+        artifact = json.loads(CLIMATOLOGY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "Boundary diagnostics unavailable."
+    rows_data = (
+        artifact.get("diagnostics", {})
+        .get("boundary_continuity", {})
+        .get("rows", [])
+    )
+    if not isinstance(rows_data, list) or not rows_data:
+        return "Boundary diagnostics unavailable."
+
+    rows = [
+        "| city | boundary | fixed_value_c | legacy_z_before_after | "
+        "legacy_jump | smooth_z_before_after | smooth_jump |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for item in rows_data:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            f"| {item['city']} | {item['boundary']} | {item['fixed_value']:.1f} | "
+            f"{item['legacy_before_z']:.2f} -> {item['legacy_after_z']:.2f} | "
+            f"{item['legacy_jump']:.2f} | "
+            f"{item['smooth_before_z']:.2f} -> {item['smooth_after_z']:.2f} | "
+            f"{item['smooth_jump']:.2f} |"
+        )
+    return "\n".join(rows)
+
+
 def _threshold_value(stats: object, key: str) -> float | None:
     if not isinstance(stats, dict):
         return None
@@ -1030,6 +1079,10 @@ def write_evaluation(
   percentile lower tails, and wet-hour-only 99.5th percentile rain amount.
   The quantile level is a fixed rare-tail hypothesis, not tuned to replay rates.
 - {_empirical_threshold_summary()}
+- DS-3 replaces month/local-hour buckets with a transparent local
+  day-of-year smoothing window: median and MAD are computed at the same local
+  hour over +/-15 neighboring training days. The DS-2 empirical quantiles are
+  recomputed from these smooth training residuals before replay.
 - Readings replayed: **{data.total_readings}** across **{data.total_city_days}**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,
@@ -1076,6 +1129,10 @@ Interpretation:
 ## Calibration Before/After
 
 {before_after_table(before, after, data)}
+
+## Boundary Continuity
+
+{boundary_continuity_table()}
 
 ## Legacy Volume vs Native Incidents
 
@@ -1137,13 +1194,13 @@ def main() -> None:
     legacy = replay_legacy(data, forecasts)
     print(f"Legacy raw outputs: {len(legacy)}")
 
-    print("Replaying DS-1 z-gated thresholds...")
-    before = replay_native(data, forecasts, profile=DS1_Z_GATE_PROFILE)
-    print(f"DS-1 z-gated incidents: {len(before.incidents)}")
+    print("Replaying DS-2 month-hour quantile baseline...")
+    before = replay_native(data, forecasts, profile=DS2_MONTH_HOUR_PROFILE)
+    print(f"DS-2 month-hour incidents: {len(before.incidents)}")
 
-    print("Replaying DS-2 empirical quantile gates...")
+    print("Replaying DS-3 smooth quantile baseline...")
     after = replay_native(data, forecasts, profile=current_profile())
-    print(f"DS-2 empirical quantile incidents: {len(after.incidents)}")
+    print(f"DS-3 smooth incidents: {len(after.incidents)}")
 
     tp, fp, fn, scenario_details, mttd = evaluate_labeled()
     precision = tp / (tp + fp) if (tp + fp) else 1.0

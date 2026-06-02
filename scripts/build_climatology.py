@@ -22,7 +22,7 @@ import httpx
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.detection.timeofday import local_hour, local_month  # noqa: E402
+from app.detection.timeofday import local_day_of_year, local_hour, local_month  # noqa: E402
 from app.features import (  # noqa: E402
     DEFAULT_EMPIRICAL_LOWER_QUANTILE,
     DEFAULT_EMPIRICAL_TAIL_QUANTILE,
@@ -39,7 +39,17 @@ DEFAULT_END_DATE = date(2021, 12, 31)
 DEFAULT_OUTPUT = PROJECT_ROOT / "app" / "data" / "climatology.json"
 MIN_BUCKET_N = 30
 CONTINUOUS_METRICS = tuple(metric for metric in HOURLY_VARIABLES if metric != "weather_code")
+BASELINE_METRICS = (
+    "temperature_2m",
+    "precipitation",
+    "wind_gusts_10m",
+    "pressure_msl",
+)
 ARCHIVE_FETCH_ATTEMPTS = 5
+SMOOTH_WINDOW_DAYS = 15
+DAYS_IN_YEAR = 366
+BOUNDARY_DIAGNOSTIC_METRIC = "temperature_2m"
+BOUNDARY_DIAGNOSTIC_LOCAL_HOUR = 12
 
 
 def main() -> None:
@@ -56,7 +66,7 @@ def main() -> None:
         chunk_days=args.chunk_days,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+    args.output.write_text(json.dumps(artifact, sort_keys=True, separators=(",", ":")) + "\n")
     print(f"Wrote {args.output}")
 
 
@@ -68,6 +78,8 @@ def build_climatology(
 ) -> dict[str, Any]:
     metric_values: dict[tuple[str, str, str], list[float]] = defaultdict(list)
     precip_amounts: dict[tuple[str, str], list[float]] = defaultdict(list)
+    smooth_metric_values: dict[tuple[str, int, int, str], list[float]] = defaultdict(list)
+    smooth_precip_amounts: dict[tuple[str, int, int], list[float]] = defaultdict(list)
 
     with httpx.Client(timeout=60.0) as client:
         for city in CITIES:
@@ -81,13 +93,14 @@ def build_climatology(
                 for row in rows:
                     ts = row["observation_ts"]
                     month = local_month(city.name, ts)
+                    day = local_day_of_year(city.name, ts)
                     hour = local_hour(city.name, ts)
-                    if month is None or hour is None:
+                    if month is None or day is None or hour is None:
                         continue
 
                     month_key = str(month)
                     hour_key = str(hour)
-                    for metric in CONTINUOUS_METRICS:
+                    for metric in BASELINE_METRICS:
                         value = row.get(metric)
                         if value is None:
                             continue
@@ -97,6 +110,9 @@ def build_climatology(
                         )
                         metric_values[(city.name, month_key, metric)].append(numeric_value)
                         metric_values[(city.name, "city", metric)].append(numeric_value)
+                        smooth_metric_values[(city.name, day, hour, metric)].append(
+                            numeric_value
+                        )
 
                     precip = row.get("precipitation")
                     if precip is not None:
@@ -104,8 +120,16 @@ def build_climatology(
                         precip_amounts[(city.name, f"{month_key}|{hour_key}")].append(amount)
                         precip_amounts[(city.name, month_key)].append(amount)
                         precip_amounts[(city.name, "city")].append(amount)
+                        smooth_precip_amounts[(city.name, day, hour)].append(amount)
 
-    return _artifact_from_values(start_date, end_date, metric_values, precip_amounts)
+    return _artifact_from_values(
+        start_date,
+        end_date,
+        metric_values,
+        precip_amounts,
+        smooth_metric_values,
+        smooth_precip_amounts,
+    )
 
 
 def _artifact_from_values(
@@ -113,6 +137,8 @@ def _artifact_from_values(
     end_date: date,
     metric_values: Mapping[tuple[str, str, str], list[float]],
     precip_amounts: Mapping[tuple[str, str], list[float]],
+    smooth_metric_values: Mapping[tuple[str, int, int, str], list[float]],
+    smooth_precip_amounts: Mapping[tuple[str, int, int], list[float]],
 ) -> dict[str, Any]:
     buckets: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
     month_fallbacks: dict[str, dict[str, dict[str, Any]]] = {}
@@ -127,6 +153,8 @@ def _artifact_from_values(
             city_fallbacks.setdefault(city, {})[metric] = stats
         else:
             month_fallbacks.setdefault(city, {}).setdefault(scope, {})[metric] = stats
+
+    smooth_buckets = _smooth_metric_buckets(smooth_metric_values)
 
     precip_buckets: dict[str, dict[str, dict[str, Any]]] = {}
     precip_month_fallbacks: dict[str, dict[str, Any]] = {}
@@ -144,7 +172,23 @@ def _artifact_from_values(
         else:
             precip_month_fallbacks.setdefault(city, {})[scope] = stats
 
-    empirical_thresholds = _empirical_thresholds(metric_values, precip_amounts, buckets)
+    smooth_precip_buckets = _smooth_precipitation_buckets(smooth_precip_amounts)
+    empirical_thresholds = _empirical_thresholds(
+        smooth_metric_values,
+        precip_amounts,
+        smooth_buckets,
+        method=(
+            "Training-window empirical residual quantiles after "
+            "city/day-of-year/local-hour smooth median-MAD standardization; "
+            "precipitation amount uses wet hours only."
+        ),
+    )
+    legacy_empirical_thresholds = _legacy_empirical_thresholds(
+        metric_values,
+        precip_amounts,
+        buckets,
+    )
+    diagnostics = _diagnostics(buckets, smooth_buckets)
 
     return {
         "version": 1,
@@ -154,17 +198,30 @@ def _artifact_from_values(
             "end": end_date.isoformat(),
         },
         "timezone": "GMT fetch, bucketed by city local time",
-        "metrics": list(CONTINUOUS_METRICS),
+        "baseline": {
+            "method": "day_of_year_smoothing_window",
+            "smooth_window_days": SMOOTH_WINDOW_DAYS,
+            "description": (
+                "For each city, local day-of-year, and local hour, median and MAD "
+                "are computed from the same local hour across +/-15 training days."
+            ),
+        },
+        "source_metrics": list(CONTINUOUS_METRICS),
+        "metrics": list(BASELINE_METRICS),
         "metric_epsilons": DEFAULT_METRIC_EPSILONS,
         "min_bucket_n": MIN_BUCKET_N,
+        "smooth_buckets": smooth_buckets,
         "buckets": buckets,
         "fallbacks": {
             "month": month_fallbacks,
             "city": city_fallbacks,
         },
         "empirical_thresholds": empirical_thresholds,
+        "legacy_empirical_thresholds": legacy_empirical_thresholds,
+        "diagnostics": diagnostics,
         "precipitation": {
             "wet_threshold_mm": DEFAULT_PRECIP_WET_THRESHOLD_MM,
+            "smooth_buckets": smooth_precip_buckets,
             "buckets": precip_buckets,
             "fallbacks": {
                 "month": precip_month_fallbacks,
@@ -174,7 +231,54 @@ def _artifact_from_values(
     }
 
 
-def _empirical_thresholds(
+def _smooth_metric_buckets(
+    values_by_day: Mapping[tuple[str, int, int, str], list[float]],
+) -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
+    buckets: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+    city_hour_metrics = {
+        (city, hour, metric)
+        for city, _day, hour, metric in values_by_day
+    }
+    for city, hour, metric in sorted(city_hour_metrics):
+        for day in range(1, DAYS_IN_YEAR + 1):
+            values: list[float] = []
+            for window_day in _window_days(day):
+                values.extend(values_by_day.get((city, window_day, hour, metric), ()))
+            if not values:
+                continue
+            stats = robust_stats(values, epsilon=DEFAULT_METRIC_EPSILONS.get(metric, 1.0))
+            buckets.setdefault(city, {}).setdefault(str(day), {}).setdefault(str(hour), {})[
+                metric
+            ] = stats
+    return buckets
+
+
+def _smooth_precipitation_buckets(
+    amounts_by_day: Mapping[tuple[str, int, int], list[float]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    buckets: dict[str, dict[str, dict[str, Any]]] = {}
+    city_hours = {(city, hour) for city, _day, hour in amounts_by_day}
+    for city, hour in sorted(city_hours):
+        for day in range(1, DAYS_IN_YEAR + 1):
+            amounts: list[float] = []
+            for window_day in _window_days(day):
+                amounts.extend(amounts_by_day.get((city, window_day, hour), ()))
+            if not amounts:
+                continue
+            stats = wet_precipitation_stats(
+                amounts,
+                wet_threshold_mm=DEFAULT_PRECIP_WET_THRESHOLD_MM,
+            )
+            buckets.setdefault(city, {}).setdefault(str(day), {})[str(hour)] = stats
+    return buckets
+
+
+def _window_days(day: int) -> Iterable[int]:
+    for offset in range(-SMOOTH_WINDOW_DAYS, SMOOTH_WINDOW_DAYS + 1):
+        yield ((day - 1 + offset) % DAYS_IN_YEAR) + 1
+
+
+def _legacy_empirical_thresholds(
     metric_values: Mapping[tuple[str, str, str], list[float]],
     precip_amounts: Mapping[tuple[str, str], list[float]],
     buckets: Mapping[str, Mapping[str, Mapping[str, Mapping[str, Any]]]],
@@ -219,16 +323,176 @@ def _empirical_thresholds(
             4,
         )
 
-    return {
-        "method": (
+    return _threshold_artifact(
+        metric_thresholds,
+        method=(
             "Training-window empirical residual quantiles after city/month/local-hour "
             "median-MAD standardization; precipitation amount uses wet hours only."
         ),
+    )
+
+
+def _empirical_thresholds(
+    values_by_day: Mapping[tuple[str, int, int, str], list[float]],
+    precip_amounts: Mapping[tuple[str, str], list[float]],
+    smooth_buckets: Mapping[str, Mapping[str, Mapping[str, Mapping[str, Any]]]],
+    *,
+    method: str,
+) -> dict[str, Any]:
+    residuals_by_metric: dict[str, list[float]] = defaultdict(list)
+    for (city, day, hour, metric), values in values_by_day.items():
+        stats = smooth_buckets.get(city, {}).get(str(day), {}).get(str(hour), {}).get(metric)
+        if not stats:
+            continue
+        center = float(stats["median"])
+        scale = max(float(stats["scale"]), DEFAULT_METRIC_EPSILONS.get(metric, 1.0))
+        residuals_by_metric[metric].extend((value - center) / scale for value in values)
+
+    metric_thresholds: dict[str, dict[str, float | int]] = {}
+    for metric, residuals in residuals_by_metric.items():
+        if not residuals:
+            continue
+        metric_thresholds[metric] = {
+            "n": len(residuals),
+            "upper_z": round(percentile(residuals, DEFAULT_EMPIRICAL_TAIL_QUANTILE), 4),
+            "lower_z": round(percentile(residuals, DEFAULT_EMPIRICAL_LOWER_QUANTILE), 4),
+            "abs_z": round(
+                percentile([abs(value) for value in residuals], DEFAULT_EMPIRICAL_TAIL_QUANTILE),
+                4,
+            ),
+        }
+
+    wet_amounts = _wet_amounts(precip_amounts)
+    if wet_amounts:
+        metric_thresholds.setdefault("precipitation", {})["wet_count"] = len(wet_amounts)
+        metric_thresholds["precipitation"]["wet_amount_mm"] = round(
+            percentile(wet_amounts, DEFAULT_EMPIRICAL_TAIL_QUANTILE),
+            4,
+        )
+
+    return _threshold_artifact(metric_thresholds, method=method)
+
+
+def _wet_amounts(precip_amounts: Mapping[tuple[str, str], list[float]]) -> list[float]:
+    wet_amounts: list[float] = []
+    for (_city, scope), amounts in precip_amounts.items():
+        if "|" not in scope:
+            continue
+        wet_amounts.extend(
+            amount for amount in amounts if amount >= DEFAULT_PRECIP_WET_THRESHOLD_MM
+        )
+    return wet_amounts
+
+
+def _threshold_artifact(
+    metric_thresholds: Mapping[str, Mapping[str, float | int]],
+    *,
+    method: str,
+) -> dict[str, Any]:
+    return {
+        "method": method,
         "tail_probability": round((100.0 - DEFAULT_EMPIRICAL_TAIL_QUANTILE) / 100.0, 4),
         "upper_quantile": DEFAULT_EMPIRICAL_TAIL_QUANTILE,
         "lower_quantile": DEFAULT_EMPIRICAL_LOWER_QUANTILE,
         "metrics": metric_thresholds,
     }
+
+
+def _diagnostics(
+    legacy_buckets: Mapping[str, Mapping[str, Mapping[str, Mapping[str, Any]]]],
+    smooth_buckets: Mapping[str, Mapping[str, Mapping[str, Mapping[str, Any]]]],
+) -> dict[str, Any]:
+    boundaries = (
+        ("Dec31->Jan1", 12, 365, 1, 1),
+        ("May31->Jun1", 5, 151, 6, 152),
+    )
+    rows: list[dict[str, Any]] = []
+    hour = BOUNDARY_DIAGNOSTIC_LOCAL_HOUR
+    metric = BOUNDARY_DIAGNOSTIC_METRIC
+    for city in sorted(city.name for city in CITIES):
+        for label, before_month, before_day, after_month, after_day in boundaries:
+            legacy_before = _stats_for_boundary(
+                legacy_buckets,
+                city,
+                str(before_month),
+                str(hour),
+                metric,
+            )
+            legacy_after = _stats_for_boundary(
+                legacy_buckets,
+                city,
+                str(after_month),
+                str(hour),
+                metric,
+            )
+            smooth_before = _stats_for_boundary(
+                smooth_buckets,
+                city,
+                str(before_day),
+                str(hour),
+                metric,
+            )
+            smooth_after = _stats_for_boundary(
+                smooth_buckets,
+                city,
+                str(after_day),
+                str(hour),
+                metric,
+            )
+            if None in (legacy_before, legacy_after, smooth_before, smooth_after):
+                continue
+            fixed_value = (
+                float(smooth_before["median"]) + float(smooth_after["median"])
+            ) / 2
+            legacy_before_z = _z_for_stats(fixed_value, legacy_before)
+            legacy_after_z = _z_for_stats(fixed_value, legacy_after)
+            smooth_before_z = _z_for_stats(fixed_value, smooth_before)
+            smooth_after_z = _z_for_stats(fixed_value, smooth_after)
+            rows.append(
+                {
+                    "city": city,
+                    "boundary": label,
+                    "metric": metric,
+                    "local_hour": hour,
+                    "fixed_value": round(fixed_value, 3),
+                    "legacy_before_z": round(legacy_before_z, 3),
+                    "legacy_after_z": round(legacy_after_z, 3),
+                    "legacy_jump": round(abs(legacy_after_z - legacy_before_z), 3),
+                    "smooth_before_z": round(smooth_before_z, 3),
+                    "smooth_after_z": round(smooth_after_z, 3),
+                    "smooth_jump": round(abs(smooth_after_z - smooth_before_z), 3),
+                }
+            )
+    return {
+        "boundary_continuity": {
+            "method": (
+                "Fixed value z-score across calendar boundaries. Legacy uses "
+                "month/local-hour buckets; smooth uses day-of-year/local-hour "
+                f"+/-{SMOOTH_WINDOW_DAYS} day buckets."
+            ),
+            "rows": rows,
+        }
+    }
+
+
+def _stats_for_boundary(
+    root: Mapping[str, Mapping[str, Mapping[str, Mapping[str, Any]]]],
+    city: str,
+    period: str,
+    hour: str,
+    metric: str,
+) -> Mapping[str, Any] | None:
+    stats = root.get(city, {}).get(period, {}).get(hour, {}).get(metric)
+    return stats if isinstance(stats, Mapping) else None
+
+
+def _z_for_stats(value: float, stats: Mapping[str, Any]) -> float:
+    center = float(stats["median"])
+    scale = max(
+        float(stats["scale"]),
+        DEFAULT_METRIC_EPSILONS.get(BOUNDARY_DIAGNOSTIC_METRIC, 1.0),
+    )
+    return (value - center) / scale
 
 
 def _fetch_city_rows(

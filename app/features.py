@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from app.detection.timeofday import local_hour, local_month
+from app.detection.timeofday import local_day_of_year, local_hour, local_month
 
 DEFAULT_CLIMATOLOGY_PATH = Path(__file__).resolve().parent / "data" / "climatology.json"
 MAD_TO_SIGMA = 1.4826
@@ -81,8 +81,17 @@ class ForecastResidual:
 
 
 class Climatology:
-    def __init__(self, data: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        data: Mapping[str, Any],
+        *,
+        baseline_variant: str | None = None,
+        threshold_variant: str | None = None,
+    ) -> None:
         self.data = data
+        self.baseline_variant = baseline_variant or (
+            "smooth" if isinstance(data.get("smooth_buckets"), Mapping) else "legacy"
+        )
         self.min_bucket_n = int(data.get("min_bucket_n", 30))
         self.metric_epsilons = {
             **DEFAULT_METRIC_EPSILONS,
@@ -97,7 +106,15 @@ class Climatology:
         self.wet_threshold_mm = float(
             precipitation.get("wet_threshold_mm", DEFAULT_PRECIP_WET_THRESHOLD_MM)
         )
-        thresholds = data.get("empirical_thresholds", {})
+        resolved_threshold_variant = threshold_variant or self.baseline_variant
+        threshold_key = (
+            "legacy_empirical_thresholds"
+            if resolved_threshold_variant == "legacy"
+            else "empirical_thresholds"
+        )
+        thresholds = data.get(threshold_key, {})
+        if not thresholds and threshold_key == "legacy_empirical_thresholds":
+            thresholds = data.get("empirical_thresholds", {})
         self.empirical_thresholds = thresholds if isinstance(thresholds, Mapping) else {}
         self.empirical_upper_quantile = float(
             self.empirical_thresholds.get(
@@ -217,9 +234,16 @@ class Climatology:
         observation_ts: Any,
     ) -> tuple[Mapping[str, Any] | None, str]:
         month = local_month(city, observation_ts)
+        day = local_day_of_year(city, observation_ts)
         hour = local_hour(city, observation_ts)
         buckets = self.data.get("buckets", {})
+        smooth_buckets = self.data.get("smooth_buckets", {})
         fallback = self.data.get("fallbacks", {})
+
+        if self.baseline_variant == "smooth" and day is not None and hour is not None:
+            stats = _nested_stats(smooth_buckets, city, day, hour, metric)
+            if _has_enough(stats, self.min_bucket_n):
+                return stats, "smooth_hod"
 
         if month is not None and hour is not None:
             stats = _nested_stats(buckets, city, month, hour, metric)
@@ -242,10 +266,16 @@ class Climatology:
         observation_ts: Any,
     ) -> tuple[Mapping[str, Any] | None, str]:
         month = local_month(city, observation_ts)
+        day = local_day_of_year(city, observation_ts)
         hour = local_hour(city, observation_ts)
         precipitation = self.data.get("precipitation", {})
         if not isinstance(precipitation, Mapping):
             return None, "missing"
+
+        if self.baseline_variant == "smooth" and day is not None and hour is not None:
+            stats = _nested_stats(precipitation.get("smooth_buckets", {}), city, day, hour)
+            if _has_enough(stats, self.min_bucket_n, n_key="wet_count"):
+                return stats, "smooth_hod"
 
         if month is not None and hour is not None:
             stats = _nested_stats(precipitation.get("buckets", {}), city, month, hour)
@@ -485,7 +515,7 @@ def _has_enough(
 
 
 def _confidence_for_bucket(bucket: str, n: int, min_bucket_n: int) -> float:
-    if bucket == "hod":
+    if bucket in {"hod", "smooth_hod"}:
         return 1.0
     if bucket == "month":
         return 0.55
