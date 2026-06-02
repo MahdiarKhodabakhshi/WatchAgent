@@ -8,6 +8,7 @@ from app.detection.native_common import (
     confidence_input,
     has_native_history,
     make_candidate,
+    z_rarity,
 )
 from app.features import k_hour_delta
 
@@ -15,6 +16,9 @@ TEMPERATURE_SHOCK_Z = 3.0
 TEMPERATURE_SHOCK_DELTA_C = 5.0
 TEMPERATURE_SHOCK_HOURS = 3
 USE_EMPIRICAL_QUANTILE_GATES = True
+# Magnitude axis anchor: a ~6 degC swing over the shock window is a large physical
+# move. Magnitude is the absolute temperature change, orthogonal to the rarity axis.
+TEMPERATURE_SHOCK_MAGNITUDE_ANCHOR_C = 6.0
 
 
 @dataclass(frozen=True)
@@ -80,8 +84,16 @@ class TemperatureShockDetector:
                     f"{TEMPERATURE_SHOCK_HOURS}h."
                 ),
                 score_inputs={
-                    "rarity": min(abs_z / 4.0, 1.0),
-                    "magnitude": min(abs_delta / 6.0, 1.0),
+                    "rarity": z_rarity(
+                        climatology,
+                        "temperature_2m",
+                        z.z,
+                        tail="upper" if z.z >= 0 else "lower",
+                        legacy=min(abs_z / 4.0, 1.0),
+                    ),
+                    "magnitude": min(
+                        abs_delta / TEMPERATURE_SHOCK_MAGNITUDE_ANCHOR_C, 1.0
+                    ),
                     "compound": 0.5,
                     "confidence": confidence_input(z.confidence),
                 },

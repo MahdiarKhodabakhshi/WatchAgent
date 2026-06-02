@@ -166,31 +166,32 @@ lifecycle/scoring fields are additive.
     {
       "id": 1,
       "city": "Toronto",
-      "event_ts": "2024-07-16T17:00:00Z",
-      "created_at": "2024-07-16T17:05:01Z",
+      "event_ts": "2024-08-15T20:00:00Z",
+      "created_at": "2024-08-15T20:05:01Z",
       "event_type": "heavy_rain_burst",
       "severity": "severe",
       "metric": "precipitation",
       "signal_values": {
-        "amount_mm": 4.4,
-        "accumulation_mm": 11.0,
+        "amount_mm": 18.0,
+        "accumulation_mm": 24.0,
         "wet_hour_quantile_mm": 5.0,
         "absolute_hazard_floor_mm": 10.0,
         "threshold_mm": 10.0,
+        "trigger": "hourly",
         "threshold_source": "training_wet_hour_upper_quantile_with_hazard_floor"
       },
-      "reason": "Toronto's rain accumulation reached 11.0 mm over 6h during a wet hour.",
+      "reason": "Toronto has a heavy rain burst: 18.0 mm this hour and 24.0 mm over 6h.",
       "supporting_reading_ids": [101, 102, 103],
       "status": "ongoing",
-      "onset_ts": "2024-07-16T17:00:00Z",
-      "peak_ts": "2024-07-16T17:00:00Z",
+      "onset_ts": "2024-08-15T20:00:00Z",
+      "peak_ts": "2024-08-15T20:00:00Z",
       "resolved_ts": null,
-      "priority_score": 67.0,
+      "priority_score": 74.2,
       "confidence": 0.95,
       "dedupe_key": "Toronto|heavy_rain_burst|precipitation",
       "evidence": {
         "lifecycle": {
-          "peak_strength": 11.0,
+          "peak_strength": 24.0,
           "clear_count": 0
         }
       }
@@ -208,7 +209,36 @@ resolves one persistent `Event` per stable `dedupe_key`.
 Scoring is centralized in `app/detection/scoring.py`. Each detector provides normalized
 score inputs such as rarity, magnitude, persistence, compound evidence, forecast surprise,
 spatial separation, and confidence. `priority_score` is a weighted 0-100 value, and stored
-`severity` is derived from score: `<30 info`, `30-59 warning`, `>=60 severe`.
+`severity` is derived from score: `<30 info`, `30-59 warning`, `>=60 severe`. The severe
+floor is the replayed incident score p90, so severe stays the rare top tier (**10.2%** of
+DS-4 incidents at floor 60, versus 24% at 55); a top-tier alert level should be rare and
+actionable rather than a quarter of the feed.
+
+#### Two orthogonal axes: rarity and magnitude
+
+Rarity and magnitude are deliberately **different questions**, not two functions of the
+same z-score:
+
+- **Rarity = statistical tail position.** It is the empirical **surprisal**,
+  `-log(tail probability) = -log(1 - empirical_CDF)`, computed from per-metric training
+  tail anchors stored in the climatology artifact. A 1-in-1000 event scores strictly
+  above a 1-in-100 event instead of both saturating; surprisal is capped near a
+  1-in-10,000 tail (`-log(1e-4)`) so realistic extremes separate near the top rather than
+  clipping mid-range.
+- **Magnitude = absolute physical size.** It is the raw hazard in native units --
+  mm of rain, degC of departure from the baseline median, km/h of gust -- normalized
+  against a fixed physical anchor (for example ECCC-scale rainfall and gust amounts).
+
+Because the axes are orthogonal, a **rare-but-small** event (an odd reading that is far in
+the tail but physically minor) and a **common-but-large** event (a physically big number
+that is normal for that city and hour) land at different scores instead of reinforcing each
+other. Surprisal also de-saturates events that the old clipped/binary rarity over-credited. In
+ERA5 hourly reanalysis the documented Toronto/Ottawa convective floods smooth to ~11 mm/6h
+with ~4-5 mm/h peaks, below both the 10 mm/h hourly floor and the 12.5 mm/6h accumulation
+bar, so they are **not detected at all** (false negatives) in ERA5 replay -- not the
+saturated 67 they reached when every firing rain hour received full rarity credit at a
+10 mm bar. See [EVALUATION.md](EVALUATION.md) for the before/after score distribution and
+the ERA5 resolution caveat.
 
 ### Detector Catalog
 
@@ -218,7 +248,7 @@ spatial separation, and confidence. `priority_score` is a weighted 0-100 value, 
 | `pressure_plunge` | Pressure falls that often precede stormy conditions. | 3-hour sea-level pressure fall, checked against local pressure behavior and confirmed by wind/gust rise. | At least a 6 hPa fall plus wind corroboration. Replay showed weaker falls were ordinary weather noise, so the threshold keeps only sharper, compound signals. |
 | `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the smoothed local-hour climatology, collapsed by lifecycle hysteresis. | Temperature residual above the empirical 99.5th training tail (`+2.75 z`). This replaces spammy `sustained_extreme`; in the 2022-2025 test replay, 67,513 old raw firings became 176 warm/cold spell incidents. |
 | `cold_spell` | Persistent locally extreme cold. | Temperature `z_hod` below the smoothed local-hour climatology, collapsed by lifecycle hysteresis. | Temperature residual below the empirical 0.5th training tail (`-2.79 z`). The same rare-tail spell hypothesis as warm spells, with score magnitude lifting extreme cold outbreaks to severe. |
-| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount at least `max(training wet-hour 99.5th percentile, 10 mm)` or 6-hour accumulation at least the same 10 mm anchor. The artifact's wet-hour 99.5th percentile is only `5.0 mm`, so the absolute hazard floor prevents compressed wet-hour distributions from turning moderate rain into flood-style incidents. |
+| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount at least `max(training wet-hour 99.5th percentile, 10 mm)` or 6-hour accumulation at least `12.5 mm/6h` (a quarter of the ECCC 50 mm/24h rainfall warning). The artifact's wet-hour 99.5th percentile is only `5.0 mm`, so the absolute hazard floor prevents compressed wet-hour distributions from turning moderate rain into flood-style incidents. The 6h bar was raised from a round 10 mm on DS-4 rain-mix evidence: 10 mm/6h is steady ~1.7 mm/h rain, not a burst. Rarity uses surprisal against the hourly and 6h-accumulation empirical wet tails; magnitude is the absolute mm against ECCC anchors. |
 | `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | Gust residual above the empirical 99.5th training tail (`+4.05 z`) or gust around 90 km/h. The ECCC-scale absolute anchor remains an OR gate so dangerous gusts fire regardless of local z. |
 | `heat_stress` | Dangerous heat load from temperature plus moisture. | Humidex from temperature and dew point. | Humidex `>= 38`, with Humidex 40 as a strong anchor. Full-season replay produced non-trivial but not constant summer incidents. |
 | `cold_stress` | Dangerous wind chill from cold plus wind. | Wind Chill Index from temperature and wind speed. | Wind chill `<= -25` with valid cold/wind inputs. City-center archive data made `-30` effectively dead, so `-25` keeps real winter stress visible. |
@@ -244,8 +274,13 @@ supporting evidence where useful instead of a spammy feed item.
   puts temperature tails near `+2.75/-2.79 z`, while gusts require `+4.05 z`.
 - **Anomaly vs hazard floors**: pure anomaly detectors (`temperature_shock`, spells, spatial)
   use distributional quantiles only. Hazard detectors keep absolute operational floors as
-  well, for example `heavy_rain_burst` uses `max(wet-hour quantile, 10 mm)` and
-  `wind_gust_burst` keeps the 90 km/h ECCC-scale anchor.
+  well, for example `heavy_rain_burst` uses `max(wet-hour quantile, 10 mm)` hourly and a
+  `12.5 mm/6h` accumulation bar, and `wind_gust_burst` keeps the 90 km/h ECCC-scale anchor.
+- **Surprisal rarity vs absolute magnitude**: the rarity score input is the empirical
+  surprisal `-log(tail probability)` from per-metric training tail anchors, capped near a
+  1-in-10,000 tail; the magnitude input is the absolute physical size in native units. The
+  two axes are scored independently so statistical rarity and physical hazard do not collapse
+  into one number.
 - **Precip occurrence vs amount**: dry hours are modeled separately from wet-hour amount
   percentiles, so heavy rain is not compared to a zero-dominated median.
 - **Lifecycle hysteresis**: incidents open after enter criteria and resolve only after clear
@@ -267,17 +302,21 @@ The replayable evidence lives in [EVALUATION.md](EVALUATION.md):
 python3 scripts/evaluate.py --source archive --start-date 2022-01-01 --end-date 2025-12-31
 ```
 
-Current DS-3 replay uses the committed 2015-2021 climatology artifact as training data and
+Current DS-4 replay uses the committed 2015-2021 climatology artifact as training data and
 measures rates on the disjoint 2022-2025 archive test window. The artifact uses a
 day-of-year smoothing window for median and MAD, then recomputes empirical threshold quantiles
-from smooth training residuals only: upper 99.5th tails, lower 0.5th tails, and wet-hour-only
-99.5th percentile rain amount. The quantile level is a fixed rare-tail hypothesis, not tuned to
-hit an event-rate target.
+and per-metric tail anchors from smooth training residuals only: upper 99.5th tails, lower
+0.5th tails, wet-hour-only 99.5th percentile rain amount, plus the survival-curve anchors that
+drive the surprisal rarity axis. The quantile level is a fixed rare-tail hypothesis, not tuned
+to hit an event-rate target. DS-4 then replaces clipped/binary rarity with surprisal,
+decorrelates magnitude onto an absolute-physical axis, rebands severity to the new
+distribution (`>=60 severe`, the incident p90 -> 10.2% severe), and raises the 6h rain
+accumulation bar to `12.5 mm/6h`.
 
 - Legacy raw detector firings: **127,164**
-- Native lifecycle incidents: **914**
-- Overall rate: **0.209 incidents/city-day**
-- Raw-firing to incident collapse ratio: **4.54x** on native candidates
+- Native lifecycle incidents: **788**
+- Overall rate: **0.180 incidents/city-day**
+- Raw-firing to incident collapse ratio: **4.39x** on native candidates
 - `sustained_extreme` replacement: **67,513 raw firings -> 176 spell incidents**
 
 Per-type after-state:
@@ -288,7 +327,7 @@ Per-type after-state:
 | `pressure_plunge` | 52 | 0.012 |
 | `warm_spell` | 99 | 0.023 |
 | `cold_spell` | 77 | 0.018 |
-| `heavy_rain_burst` | 333 | 0.076 |
+| `heavy_rain_burst` | 207 | 0.047 |
 | `wind_gust_burst` | 131 | 0.030 |
 | `heat_stress` | 53 | 0.012 |
 | `cold_stress` | 69 | 0.016 |
@@ -309,9 +348,20 @@ Known-event spot checks from the same replay:
 
 | documented event | date | incident |
 |---|---|---|
-| Toronto heavy rainfall/flooding | 2024-07-16 | `heavy_rain_burst / precipitation`, priority 67.0, severe |
+| Toronto heavy rainfall/flooding | 2024-07-16 | **not detected** (false negative): ERA5 peak 4.3 mm/h, 11.0 mm/6h, below the 10 mm/h floor and 12.5 mm/6h bar |
 | Vancouver January deep freeze | 2024-01-12 | `cold_spell / temperature_2m`, priority 70.0, severe |
-| Ottawa severe thunderstorm/outages | 2023-06-26 | `heavy_rain_burst / precipitation`, priority 66.2, severe |
+| Ottawa severe thunderstorm/outages | 2023-06-26 | **not detected** (false negative): ERA5 peak 5.0 mm/h, 10.6 mm/6h, below the 10 mm/h floor and 12.5 mm/6h bar |
+
+DS-4 honesty note: the two convective rain spot checks are **false negatives** in ERA5
+replay -- no `heavy_rain_burst` candidate fires for either, because ERA5 hourly reanalysis
+grid-smooths the convective peak (real events exceeded 100 mm in pockets) down to ~5 mm/h and
+~11 mm/6h, below the principled 10 mm/h floor and 12.5 mm/6h bar. This is a data-resolution
+limit, not a detector or scoring regression; finer-resolution live observations would very
+likely clear the bar. The earlier "67" came from pre-DS-4 binary rarity that gave every
+firing rain hour full rarity credit at a 10 mm bar. Both events remain covered by unit and
+labeled tests; the Vancouver cold spell, a genuine multi-day tail event that ERA5 does
+resolve, still scores severe (70). See [EVALUATION.md](EVALUATION.md) for the per-detector
+before/after score distribution.
 
 ### Deliberately Out Of Scope
 

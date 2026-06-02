@@ -8,6 +8,7 @@ from app.detection.native_common import (
     confidence_input,
     has_native_history,
     make_candidate,
+    z_rarity,
 )
 from app.features import median, peer_z_values
 
@@ -83,7 +84,13 @@ class SpatialAnomalyDetector:
                     ),
                     score_inputs={
                         "spatial": min(z_gap / 5.0, 1.0),
-                        "rarity": min(own_abs_z / 4.0, 1.0),
+                        "rarity": z_rarity(
+                            climatology,
+                            metric,
+                            current_z.z,
+                            tail="upper" if current_z.z >= 0 else "lower",
+                            legacy=min(own_abs_z / 4.0, 1.0),
+                        ),
                         "confidence": confidence_input(current_z.confidence),
                     },
                     detector_name=self.name,

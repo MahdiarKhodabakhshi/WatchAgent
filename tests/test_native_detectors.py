@@ -145,9 +145,9 @@ def test_heavy_rain_burst_fires_on_short_window_accumulation() -> None:
     current = _reading(id=100, precipitation=2.0)
     history = _history(
         {
-            -1: {"precipitation": 3.0},
-            -2: {"precipitation": 3.0},
-            -3: {"precipitation": 3.0},
+            -1: {"precipitation": 4.0},
+            -2: {"precipitation": 4.0},
+            -3: {"precipitation": 4.0},
         }
     )
 
@@ -157,7 +157,7 @@ def test_heavy_rain_burst_fires_on_short_window_accumulation() -> None:
     assert events[0].event_type == "heavy_rain_burst"
     assert events[0].severity == "severe"
     assert events[0].signal_values["trigger"] == "accumulation"
-    assert events[0].signal_values["accumulation_mm"] == 11.0
+    assert events[0].signal_values["accumulation_mm"] == 14.0
 
 
 def test_heavy_rain_burst_near_miss_does_not_fire() -> None:

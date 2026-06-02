@@ -3,16 +3,64 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from app.detection import scoring
 from app.detection.base import (
     MIN_HISTORY_FOR_STATS,
     DetectorContext,
     EventCandidate,
 )
 from app.detection.scoring import priority_score, severity_from_score
-from app.features import Climatology, load_default_climatology
+from app.features import Climatology, load_default_climatology, rarity_from_surprisal
 
 NATIVE_DETECTOR_VERSION = "native-v1"
 MIN_NATIVE_HISTORY = MIN_HISTORY_FOR_STATS
+
+
+def surprisal_scoring_enabled() -> bool:
+    """Read the scoring mode dynamically so the eval harness can toggle it."""
+
+    return scoring.SURPRISAL_SCORING
+
+
+def z_rarity(
+    climatology: Climatology,
+    metric: str,
+    signed_z: float,
+    *,
+    tail: str,
+    legacy: float,
+) -> float:
+    """Rarity input for a z-gated metric.
+
+    Returns the surprisal-normalized tail position when DS-4 scoring is on and the
+    artifact carries tail anchors; otherwise falls back to ``legacy`` (the pre-DS-4
+    clipped ``abs_z / 4`` proxy) so older artifacts and the before-state replay stay
+    well defined.
+    """
+
+    if surprisal_scoring_enabled():
+        rarity = rarity_from_surprisal(climatology.tail_surprisal(metric, signed_z, tail=tail))
+        if rarity is not None:
+            return rarity
+    return legacy
+
+
+def amount_rarity(
+    climatology: Climatology,
+    amount: float,
+    *,
+    anchor_key: str,
+    legacy: float,
+) -> float:
+    """Rarity input for a precipitation amount against its empirical wet tail."""
+
+    if surprisal_scoring_enabled():
+        rarity = rarity_from_surprisal(
+            climatology.precip_amount_surprisal(amount, anchor_key=anchor_key)
+        )
+        if rarity is not None:
+            return rarity
+    return legacy
 
 
 def climatology_for(ctx: DetectorContext) -> Climatology:

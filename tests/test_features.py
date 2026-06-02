@@ -264,3 +264,83 @@ def _mini_smooth_climatology() -> dict:
         }
     }
     return data
+
+
+def _surprisal_climatology() -> Climatology:
+    return Climatology(
+        {
+            "metric_epsilons": {"temperature_2m": 0.5, "precipitation": 0.1},
+            "min_bucket_n": 30,
+            "buckets": {},
+            "fallbacks": {"month": {}, "city": {}},
+            "empirical_thresholds": {
+                "tail_probability": 0.005,
+                "upper_quantile": 99.5,
+                "lower_quantile": 0.5,
+                "metrics": {
+                    "temperature_2m": {
+                        "n": 1000,
+                        "upper_z": 2.58,
+                        "lower_z": -2.58,
+                        "upper_tail": [
+                            [1.28, 0.1],
+                            [1.64, 0.05],
+                            [2.33, 0.01],
+                            [2.58, 0.005],
+                            [3.09, 0.001],
+                            [3.72, 0.0001],
+                        ],
+                        "lower_tail": [
+                            [-1.28, 0.1],
+                            [-1.64, 0.05],
+                            [-2.33, 0.01],
+                            [-2.58, 0.005],
+                            [-3.09, 0.001],
+                            [-3.72, 0.0001],
+                        ],
+                    },
+                    "precipitation": {
+                        "wet_amount_mm": 5.0,
+                        "wet_amount_tail": [[2.0, 0.1], [5.0, 0.005], [12.0, 0.0001]],
+                        "accumulation_6h_tail": [[4.0, 0.1], [10.0, 0.005], [25.0, 0.0001]],
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_tail_surprisal_is_monotone_and_separates_rare_from_common() -> None:
+    climatology = _surprisal_climatology()
+
+    common = climatology.tail_surprisal("temperature_2m", 2.33, tail="upper")  # ~1-in-100
+    rarer = climatology.tail_surprisal("temperature_2m", 3.09, tail="upper")  # ~1-in-1000
+
+    assert common is not None and rarer is not None
+    assert rarer > common
+    # Lower tail mirrors the upper tail for symmetric anchors.
+    assert climatology.tail_surprisal("temperature_2m", -3.09, tail="lower") == rarer
+
+
+def test_tail_surprisal_caps_at_ceiling_and_handles_missing() -> None:
+    from app.features import SURPRISAL_CEILING, rarity_from_surprisal
+
+    climatology = _surprisal_climatology()
+
+    extreme = climatology.tail_surprisal("temperature_2m", 12.0, tail="upper")
+    assert extreme == SURPRISAL_CEILING
+    assert rarity_from_surprisal(extreme) == 1.0
+    assert rarity_from_surprisal(None) is None
+    # No anchors for an unknown metric -> None so callers can fall back.
+    assert climatology.tail_surprisal("wind_gusts_10m", 5.0, tail="upper") is None
+
+
+def test_precip_amount_surprisal_uses_requested_tail() -> None:
+    climatology = _surprisal_climatology()
+
+    hourly = climatology.precip_amount_surprisal(5.0, anchor_key="wet_amount_tail")
+    accum = climatology.precip_amount_surprisal(10.0, anchor_key="accumulation_6h_tail")
+
+    assert hourly is not None and accum is not None
+    # 5 mm/h and 10 mm/6h both sit at the stored 99.5th percentile anchor.
+    assert round(hourly, 3) == round(accum, 3)

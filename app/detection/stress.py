@@ -10,6 +10,7 @@ from app.detection.native_common import (
     has_native_history,
     make_candidate,
     numeric_attr,
+    z_rarity,
 )
 
 HEAT_STRESS_HUMIDEX = 38.0
@@ -37,7 +38,8 @@ class HeatStressDetector:
         if humidex_value < HEAT_STRESS_HUMIDEX:
             return []
 
-        z = climatology_for(ctx).z_hod(
+        climatology = climatology_for(ctx)
+        z = climatology.z_hod(
             ctx.reading.city,
             "temperature_2m",
             temperature,
@@ -63,7 +65,13 @@ class HeatStressDetector:
                     f"{dew_point:.1f}C dew point."
                 ),
                 score_inputs={
-                    "rarity": min(max(z.z or 0.0, 0.0) / 4.0, 1.0),
+                    "rarity": z_rarity(
+                        climatology,
+                        "temperature_2m",
+                        max(z.z or 0.0, 0.0),
+                        tail="upper",
+                        legacy=min(max(z.z or 0.0, 0.0) / 4.0, 1.0),
+                    ),
                     "magnitude": min(
                         (humidex_value - HEAT_STRESS_HUMIDEX)
                         / (STRONG_HEAT_HUMIDEX - HEAT_STRESS_HUMIDEX),
@@ -96,7 +104,8 @@ class ColdStressDetector:
         if chill is None or chill > COLD_STRESS_WIND_CHILL:
             return []
 
-        z = climatology_for(ctx).z_hod(
+        climatology = climatology_for(ctx)
+        z = climatology.z_hod(
             ctx.reading.city,
             "temperature_2m",
             temperature,
@@ -124,7 +133,13 @@ class ColdStressDetector:
                     f"{wind_speed:.1f} km/h wind."
                 ),
                 score_inputs={
-                    "rarity": min(cold_z / 4.0, 1.0),
+                    "rarity": z_rarity(
+                        climatology,
+                        "temperature_2m",
+                        min(z.z or 0.0, 0.0),
+                        tail="lower",
+                        legacy=min(cold_z / 4.0, 1.0),
+                    ),
                     "magnitude": min(
                         (COLD_STRESS_WIND_CHILL - chill)
                         / (COLD_STRESS_WIND_CHILL - STRONG_COLD_WIND_CHILL),

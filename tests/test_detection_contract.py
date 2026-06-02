@@ -75,6 +75,8 @@ def test_priority_score_uses_weighted_inputs_without_mutating_severity() -> None
     assert score == 45.0
     assert severity_from_score(score) == "warning"
     assert severity_from_score(29.999) == "info"
+    assert severity_from_score(30.0) == "warning"
+    assert severity_from_score(59.999) == "warning"
     assert severity_from_score(60.0) == "severe"
 
 

@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
+from math import log
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,16 @@ MAD_TO_SIGMA = 1.4826
 DEFAULT_PRECIP_WET_THRESHOLD_MM = 0.1
 DEFAULT_EMPIRICAL_TAIL_QUANTILE = 99.5
 DEFAULT_EMPIRICAL_LOWER_QUANTILE = 0.5
+# Rarity axis = surprisal in nats: -log(empirical tail probability). The floor caps
+# the rarest resolvable tail at ~1-in-10,000 so realistic extreme events separate
+# near the top instead of all saturating, and the ceiling normalizes surprisal to
+# the [0, 1] rarity input expected by the additive priority score.
+SURPRISAL_TAIL_FLOOR = 1.0e-4
+SURPRISAL_CEILING = -log(SURPRISAL_TAIL_FLOOR)
+# Upper/lower training percentiles stored as empirical tail anchors. They are dense
+# in the far tail so the surprisal interpolation tracks the rare end precisely.
+EMPIRICAL_TAIL_UPPER_PERCENTILES = (90.0, 95.0, 97.5, 99.0, 99.5, 99.9, 99.95, 99.99)
+EMPIRICAL_TAIL_LOWER_PERCENTILES = (10.0, 5.0, 2.5, 1.0, 0.5, 0.1, 0.05, 0.01)
 DEFAULT_METRIC_EPSILONS: dict[str, float] = {
     "temperature_2m": 0.5,
     "apparent_temperature": 0.5,
@@ -227,6 +238,33 @@ class Climatology:
         value = stats.get("wet_amount_mm")
         return None if value is None else float(value)
 
+    def tail_surprisal(self, metric: str, value: float, *, tail: str) -> float | None:
+        """Surprisal (nats) of a residual ``z`` from its empirical training tail.
+
+        ``tail`` is ``upper`` for positive anomalies or ``lower`` for negative
+        anomalies. Returns ``None`` when the artifact lacks tail anchors for the
+        metric so callers can fall back to a coarser rarity proxy.
+        """
+
+        stats = self._empirical_metric(metric)
+        if stats is None:
+            return None
+        key = "upper_tail" if tail == "upper" else "lower_tail"
+        return _surprisal_from_anchors(stats.get(key), abs(float(value)))
+
+    def precip_amount_surprisal(
+        self,
+        amount: float,
+        *,
+        anchor_key: str = "wet_amount_tail",
+    ) -> float | None:
+        """Surprisal (nats) of a rain amount from its empirical wet-tail anchors."""
+
+        stats = self._empirical_metric("precipitation")
+        if stats is None:
+            return None
+        return _surprisal_from_anchors(stats.get(anchor_key), float(amount))
+
     def _metric_stats(
         self,
         city: str,
@@ -318,6 +356,63 @@ class Climatology:
 @lru_cache
 def load_default_climatology() -> Climatology:
     return Climatology.from_path(DEFAULT_CLIMATOLOGY_PATH)
+
+
+def rarity_from_surprisal(surprisal: float | None) -> float | None:
+    """Map surprisal (nats) onto the [0, 1] rarity input, capped at the ceiling."""
+
+    if surprisal is None:
+        return None
+    return min(max(surprisal, 0.0) / SURPRISAL_CEILING, 1.0)
+
+
+def _surprisal_from_anchors(raw_anchors: Any, magnitude: float) -> float | None:
+    tail_prob = _interp_tail_probability(raw_anchors, magnitude)
+    if tail_prob is None:
+        return None
+    return -log(max(tail_prob, SURPRISAL_TAIL_FLOOR))
+
+
+def _interp_tail_probability(raw_anchors: Any, magnitude: float) -> float | None:
+    """Empirical tail probability P(X beyond ``magnitude``) by log-linear interpolation.
+
+    Anchors are ``[value, tail_probability]`` pairs. They are sorted by ascending
+    magnitude (descending tail probability). Below the least-rare anchor the tail
+    probability is held flat; beyond the rarest anchor it is capped at the rarest
+    stored probability, after which the surprisal floor takes over.
+    """
+
+    if not isinstance(raw_anchors, list) or not raw_anchors:
+        return None
+    anchors: list[tuple[float, float]] = []
+    for item in raw_anchors:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        anchors.append((abs(float(item[0])), float(item[1])))
+    if not anchors:
+        return None
+    anchors.sort()
+    mag = abs(magnitude)
+    if mag <= anchors[0][0]:
+        return anchors[0][1]
+    if mag >= anchors[-1][0]:
+        return anchors[-1][1]
+    for index in range(1, len(anchors)):
+        upper_mag, upper_prob = anchors[index]
+        if mag <= upper_mag:
+            lower_mag, lower_prob = anchors[index - 1]
+            span = upper_mag - lower_mag
+            weight = (mag - lower_mag) / span if span > 0 else 0.0
+            return _exp_interp(lower_prob, upper_prob, weight)
+    return anchors[-1][1]
+
+
+def _exp_interp(lower_prob: float, upper_prob: float, weight: float) -> float:
+    from math import exp
+
+    safe_lower = max(lower_prob, SURPRISAL_TAIL_FLOOR)
+    safe_upper = max(upper_prob, SURPRISAL_TAIL_FLOOR)
+    return exp(log(safe_lower) + weight * (log(safe_upper) - log(safe_lower)))
 
 
 def k_hour_delta(
@@ -457,6 +552,29 @@ def percentile(values: Sequence[float], percentile_value: float) -> float:
     upper = min(lower + 1, len(ordered) - 1)
     weight = position - lower
     return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def tail_anchors(
+    values: Sequence[float],
+    percentiles: Sequence[float],
+    *,
+    tail: str,
+) -> list[list[float]]:
+    """Build ``[value, tail_probability]`` empirical anchors for a sample.
+
+    ``tail`` is ``upper`` (tail probability ``(100 - p) / 100``) or ``lower``
+    (tail probability ``p / 100``). Anchors are emitted in ascending percentile
+    order; the runtime interpolates surprisal between them.
+    """
+
+    if not values:
+        return []
+    anchors: list[list[float]] = []
+    for p in percentiles:
+        cut = percentile(values, p)
+        tail_prob = (100.0 - p) / 100.0 if tail == "upper" else p / 100.0
+        anchors.append([round(cut, 4), round(tail_prob, 6)])
+    return anchors
 
 
 def robust_stats(values: Sequence[float], *, epsilon: float) -> dict[str, float | int]:

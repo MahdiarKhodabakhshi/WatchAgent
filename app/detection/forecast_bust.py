@@ -15,6 +15,16 @@ FORECAST_METRIC_FLOORS = {
     "wind_gusts_10m": 5.0,
     "pressure_msl": 1.0,
 }
+# Magnitude axis: absolute physical miss size at which magnitude saturates, in each
+# metric's native units. Decoupled from forecast_surprise, which stays the
+# statistical miss (residual measured in rolling-MAE multiples).
+FORECAST_MAGNITUDE_ANCHORS = {
+    "temperature_2m": 8.0,
+    "precipitation": 10.0,
+    "wind_speed_10m": 30.0,
+    "wind_gusts_10m": 40.0,
+    "pressure_msl": 12.0,
+}
 
 
 @dataclass(frozen=True)
@@ -66,7 +76,10 @@ class ForecastBustDetector:
                     ),
                     score_inputs={
                         "forecast_surprise": min(residual.normalized_error / 4.0, 1.0),
-                        "magnitude": min(residual.normalized_error / 4.0, 1.0),
+                        "magnitude": min(
+                            abs_error / FORECAST_MAGNITUDE_ANCHORS.get(metric, floor * 4.0),
+                            1.0,
+                        ),
                         "confidence": residual.confidence,
                     },
                     detector_name=self.name,

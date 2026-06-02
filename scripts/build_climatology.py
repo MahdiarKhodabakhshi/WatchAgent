@@ -28,8 +28,11 @@ from app.features import (  # noqa: E402
     DEFAULT_EMPIRICAL_TAIL_QUANTILE,
     DEFAULT_METRIC_EPSILONS,
     DEFAULT_PRECIP_WET_THRESHOLD_MM,
+    EMPIRICAL_TAIL_LOWER_PERCENTILES,
+    EMPIRICAL_TAIL_UPPER_PERCENTILES,
     percentile,
     robust_stats,
+    tail_anchors,
     wet_precipitation_stats,
 )
 from app.open_meteo import CITIES, HOURLY_VARIABLES, City  # noqa: E402
@@ -48,6 +51,9 @@ BASELINE_METRICS = (
 ARCHIVE_FETCH_ATTEMPTS = 5
 SMOOTH_WINDOW_DAYS = 15
 DAYS_IN_YEAR = 366
+# Matches HeavyRainBurstDetector's 6h accumulation window so the empirical
+# accumulation tail standardizes the same quantity the detector triggers on.
+ACCUMULATION_WINDOW_HOURS = 6
 BOUNDARY_DIAGNOSTIC_METRIC = "temperature_2m"
 BOUNDARY_DIAGNOSTIC_LOCAL_HOUR = 12
 
@@ -80,6 +86,7 @@ def build_climatology(
     precip_amounts: dict[tuple[str, str], list[float]] = defaultdict(list)
     smooth_metric_values: dict[tuple[str, int, int, str], list[float]] = defaultdict(list)
     smooth_precip_amounts: dict[tuple[str, int, int], list[float]] = defaultdict(list)
+    precip_series: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
 
     with httpx.Client(timeout=60.0) as client:
         for city in CITIES:
@@ -121,6 +128,9 @@ def build_climatology(
                         precip_amounts[(city.name, month_key)].append(amount)
                         precip_amounts[(city.name, "city")].append(amount)
                         smooth_precip_amounts[(city.name, day, hour)].append(amount)
+                        precip_series[city.name].append((ts, amount))
+
+    accumulation_amounts = _rolling_accumulations(precip_series)
 
     return _artifact_from_values(
         start_date,
@@ -129,7 +139,31 @@ def build_climatology(
         precip_amounts,
         smooth_metric_values,
         smooth_precip_amounts,
+        accumulation_amounts,
     )
+
+
+def _rolling_accumulations(
+    precip_series: Mapping[str, list[tuple[datetime, float]]],
+) -> list[float]:
+    """Wet 6h rolling precipitation totals across all cities for the accumulation tail.
+
+    Mirrors the detector's window: each total sums the current hour and the prior
+    five contiguous hours. Only fully populated, wet windows are kept.
+    """
+
+    totals: list[float] = []
+    span = timedelta(hours=ACCUMULATION_WINDOW_HOURS - 1)
+    for series in precip_series.values():
+        ordered = sorted(series, key=lambda item: item[0])
+        for idx in range(ACCUMULATION_WINDOW_HOURS - 1, len(ordered)):
+            window = ordered[idx - ACCUMULATION_WINDOW_HOURS + 1 : idx + 1]
+            if window[-1][0] - window[0][0] != span:
+                continue
+            total = sum(amount for _ts, amount in window)
+            if total >= DEFAULT_PRECIP_WET_THRESHOLD_MM:
+                totals.append(total)
+    return totals
 
 
 def _artifact_from_values(
@@ -139,6 +173,7 @@ def _artifact_from_values(
     precip_amounts: Mapping[tuple[str, str], list[float]],
     smooth_metric_values: Mapping[tuple[str, int, int, str], list[float]],
     smooth_precip_amounts: Mapping[tuple[str, int, int], list[float]],
+    accumulation_amounts: list[float],
 ) -> dict[str, Any]:
     buckets: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
     month_fallbacks: dict[str, dict[str, dict[str, Any]]] = {}
@@ -177,10 +212,13 @@ def _artifact_from_values(
         smooth_metric_values,
         precip_amounts,
         smooth_buckets,
+        accumulation_amounts,
         method=(
             "Training-window empirical residual quantiles after "
             "city/day-of-year/local-hour smooth median-MAD standardization; "
-            "precipitation amount uses wet hours only."
+            "precipitation amount uses wet hours only. Per-metric upper/lower tail "
+            "anchors carry the empirical survival curve so the runtime rarity axis "
+            "is surprisal = -log(tail probability) rather than a clipped z."
         ),
     )
     legacy_empirical_thresholds = _legacy_empirical_thresholds(
@@ -336,6 +374,7 @@ def _empirical_thresholds(
     values_by_day: Mapping[tuple[str, int, int, str], list[float]],
     precip_amounts: Mapping[tuple[str, str], list[float]],
     smooth_buckets: Mapping[str, Mapping[str, Mapping[str, Mapping[str, Any]]]],
+    accumulation_amounts: list[float],
     *,
     method: str,
 ) -> dict[str, Any]:
@@ -348,7 +387,7 @@ def _empirical_thresholds(
         scale = max(float(stats["scale"]), DEFAULT_METRIC_EPSILONS.get(metric, 1.0))
         residuals_by_metric[metric].extend((value - center) / scale for value in values)
 
-    metric_thresholds: dict[str, dict[str, float | int]] = {}
+    metric_thresholds: dict[str, dict[str, Any]] = {}
     for metric, residuals in residuals_by_metric.items():
         if not residuals:
             continue
@@ -360,14 +399,36 @@ def _empirical_thresholds(
                 percentile([abs(value) for value in residuals], DEFAULT_EMPIRICAL_TAIL_QUANTILE),
                 4,
             ),
+            "upper_tail": tail_anchors(
+                residuals, EMPIRICAL_TAIL_UPPER_PERCENTILES, tail="upper"
+            ),
+            "lower_tail": tail_anchors(
+                residuals, EMPIRICAL_TAIL_LOWER_PERCENTILES, tail="lower"
+            ),
         }
 
     wet_amounts = _wet_amounts(precip_amounts)
     if wet_amounts:
-        metric_thresholds.setdefault("precipitation", {})["wet_count"] = len(wet_amounts)
-        metric_thresholds["precipitation"]["wet_amount_mm"] = round(
+        precipitation = metric_thresholds.setdefault("precipitation", {})
+        precipitation["wet_count"] = len(wet_amounts)
+        precipitation["wet_amount_mm"] = round(
             percentile(wet_amounts, DEFAULT_EMPIRICAL_TAIL_QUANTILE),
             4,
+        )
+        precipitation["wet_amount_tail"] = tail_anchors(
+            wet_amounts, EMPIRICAL_TAIL_UPPER_PERCENTILES, tail="upper"
+        )
+
+    if accumulation_amounts:
+        precipitation = metric_thresholds.setdefault("precipitation", {})
+        precipitation["accumulation_window_hours"] = ACCUMULATION_WINDOW_HOURS
+        precipitation["accumulation_wet_count"] = len(accumulation_amounts)
+        precipitation["accumulation_6h_mm"] = round(
+            percentile(accumulation_amounts, DEFAULT_EMPIRICAL_TAIL_QUANTILE),
+            4,
+        )
+        precipitation["accumulation_6h_tail"] = tail_anchors(
+            accumulation_amounts, EMPIRICAL_TAIL_UPPER_PERCENTILES, tail="upper"
         )
 
     return _threshold_artifact(metric_thresholds, method=method)
@@ -385,7 +446,7 @@ def _wet_amounts(precip_amounts: Mapping[tuple[str, str], list[float]]) -> list[
 
 
 def _threshold_artifact(
-    metric_thresholds: Mapping[str, Mapping[str, float | int]],
+    metric_thresholds: Mapping[str, Mapping[str, Any]],
     *,
     method: str,
 ) -> dict[str, Any]:

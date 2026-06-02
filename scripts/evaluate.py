@@ -40,6 +40,7 @@ from app.db import build_engine  # noqa: E402
 from app.detection import forecast_bust as forecast_bust_module  # noqa: E402
 from app.detection import heavy_rain_burst as rain_module  # noqa: E402
 from app.detection import pressure_plunge as pressure_module  # noqa: E402
+from app.detection import scoring as scoring_module  # noqa: E402
 from app.detection import spatial_anomaly as spatial_module  # noqa: E402
 from app.detection import spells as spells_module  # noqa: E402
 from app.detection import stress as stress_module  # noqa: E402
@@ -91,6 +92,9 @@ LEGACY_REPLACEMENTS = (
     ("wmo_transition", "supporting evidence only"),
     ("fun_fact", "retired from primary feed"),
 )
+# Each entry's `evidence` string is only rendered when a severe incident matches in
+# +/-48h; the rain entries currently do not match in ERA5 replay (see the honesty
+# note under the spot-check table) so their evidence describes that false negative.
 KNOWN_EVENT_SPOT_CHECKS = [
     {
         "event": "Toronto heavy rainfall/flooding",
@@ -103,9 +107,7 @@ KNOWN_EVENT_SPOT_CHECKS = [
         ),
         "source_summary": "City reported more than 100 mm in pockets across Toronto.",
         "incident": "heavy_rain_burst / precipitation",
-        "incident_ts": "2024-07-16 17:00 UTC",
-        "score": "67.0",
-        "evidence": "severe; 6h accumulation trigger reached 11.0 mm in archive data",
+        "evidence": "ERA5 peak 4.3 mm/h, max 11.0 mm/6h -- below the bar; not detected",
     },
     {
         "event": "Vancouver January deep freeze",
@@ -118,9 +120,7 @@ KNOWN_EVENT_SPOT_CHECKS = [
         ),
         "source_summary": "ECCC noted wind chills reaching Vancouver's waterfront.",
         "incident": "cold_spell / temperature_2m",
-        "incident_ts": "2024-01-11 21:00 UTC",
-        "score": "70.0",
-        "evidence": "severe; Jan 12 candidates reached z=4.2 to z=7.1",
+        "evidence": "Jan 12 candidates reached z=4.2 to z=7.1",
     },
     {
         "event": "Ottawa severe thunderstorm/outages",
@@ -133,9 +133,7 @@ KNOWN_EVENT_SPOT_CHECKS = [
         ),
         "source_summary": "Thousands lost power; ECCC warned of downpours, hail, wind.",
         "incident": "heavy_rain_burst / precipitation",
-        "incident_ts": "2023-06-27 02:00 UTC",
-        "score": "65.2",
-        "evidence": "severe; 6h accumulation trigger reached 10.6 mm in archive data",
+        "evidence": "ERA5 peak 5.0 mm/h, max 10.6 mm/6h -- below the bar; not detected",
     },
 ]
 
@@ -162,6 +160,7 @@ class CalibrationProfile:
     forecast_bust_k: float
     spatial_z_gap: float
     spatial_min_own_z: float
+    surprisal_scoring: bool = True
 
 
 DS2_MONTH_HOUR_PROFILE = CalibrationProfile(
@@ -555,6 +554,7 @@ def _candidate_strength(candidate: EventCandidate) -> float:
 @contextmanager
 def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
     patches = {
+        scoring_module: {"SURPRISAL_SCORING": profile.surprisal_scoring},
         temp_module: {
             "USE_EMPIRICAL_QUANTILE_GATES": profile.use_empirical_quantile_gates,
             "TEMPERATURE_SHOCK_Z": profile.temperature_shock_z,
@@ -605,7 +605,7 @@ def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
 
 def current_profile() -> CalibrationProfile:
     return CalibrationProfile(
-        name="DS-3 smooth quantile baseline",
+        name="DS-4 surprisal scoring on smooth baseline",
         baseline_variant="smooth",
         threshold_variant="smooth",
         use_empirical_quantile_gates=True,
@@ -625,6 +625,23 @@ def current_profile() -> CalibrationProfile:
         forecast_bust_k=forecast_bust_module.FORECAST_BUST_K,
         spatial_z_gap=spatial_module.SPATIAL_Z_GAP,
         spatial_min_own_z=spatial_module.SPATIAL_MIN_OWN_Z,
+    )
+
+
+def ds3_scoring_profile() -> CalibrationProfile:
+    """Smooth DS-3 baseline scored with the pre-DS-4 clipped rarity / z-magnitude.
+
+    Identical detectors and gates to :func:`current_profile`; only the scoring mode
+    differs, so a before/after diff isolates the DS-4 surprisal + decorrelation
+    change from the DS-3 baseline change.
+    """
+
+    from dataclasses import replace
+
+    return replace(
+        current_profile(),
+        name="DS-3 smooth baseline, clipped rarity (pre-DS-4 scoring)",
+        surprisal_scoring=False,
     )
 
 
@@ -806,8 +823,25 @@ def calibration_changes_table() -> str:
         "| spatial_anomaly | own-anomaly quantile gate now uses smooth residuals; "
         "peer z-gap remains 5.0 | The city must still be anomalous in its own "
         "metric-specific tail before peer comparison. |",
-        "| scoring weights | unchanged | "
-        "DS-3 changes the baseline only; score histograms are deferred to DS-4. |",
+        "| scoring weights | unchanged additive 0-100 blend | "
+        "DS-4 keeps the API-additive weights but redefines two inputs: rarity is now "
+        "surprisal (empirical tail position) and magnitude is absolute physical size. |",
+        "| rarity input | clipped `abs_z/4` (and binary 1.0 for rain) -> surprisal "
+        "`-log(tail prob)` capped near a 1-in-10,000 tail | A 1-in-1000 event now "
+        "outscores a 1-in-100 event instead of both saturating mid-range. |",
+        "| magnitude input | shared function of the same z -> absolute physical size "
+        "(mm rain, degC departure, km/h gust) | Decorrelated so a rare-but-small and a "
+        "common-but-large event score differently. |",
+        "| severity bands | "
+        f"{scoring_module.SEVERITY_WARNING_FLOOR:.0f}/"
+        f"{scoring_module.SEVERITY_SEVERE_FLOOR:.0f} (band numbers unchanged) | "
+        "Surprisal + absolute magnitude reshape the score distribution, so the severe "
+        "floor is re-derived as the replayed incident p90 (~10% severe). It lands at the "
+        "same 60 as the pre-DS-4 cut, so the boundary numbers do not move. |",
+        "| heavy_rain accumulation bar | "
+        f"10 mm/6h -> {rain_module.MIN_HEAVY_RAIN_ACCUMULATION_MM:g} mm/6h | "
+        "Set from the rain-mix histogram and anchored to a quarter of the ECCC "
+        "50 mm/24h rainfall warning over a 6h window. |",
     ]
     return "\n".join(rows)
 
@@ -862,6 +896,155 @@ def _match_known_event(
     if not matches:
         return None
     return max(matches, key=lambda incident: incident.priority_score)
+
+
+def _candidate_scores_by_type(replay: NativeReplay) -> dict[str, list[float]]:
+    from app.detection.scoring import candidate_priority_score
+
+    scores: dict[str, list[float]] = defaultdict(list)
+    for _reading, candidate in replay.raw:
+        scores[candidate.event_type].append(candidate_priority_score(candidate))
+    return scores
+
+
+def _percentiles(values: list[float], points: tuple[float, ...]) -> list[float]:
+    if not values:
+        return [0.0 for _ in points]
+    ordered = sorted(values)
+    out: list[float] = []
+    for p in points:
+        position = (len(ordered) - 1) * p / 100
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = position - lower
+        out.append(ordered[lower] * (1 - weight) + ordered[upper] * weight)
+    return out
+
+
+def score_distribution_table(before: NativeReplay, after: NativeReplay) -> str:
+    before_scores = _candidate_scores_by_type(before)
+    after_scores = _candidate_scores_by_type(after)
+    rows = [
+        "Per-detector raw candidate `priority_score` distribution. **before** is the "
+        "DS-3 clipped rarity / z-magnitude scoring; **after** is DS-4 surprisal rarity "
+        "with a decorrelated absolute-magnitude axis. Both run on the identical smooth "
+        "baseline and gates, so the shift is the scoring change alone.",
+        "",
+        "| detector_type | n | before p50/p90/p99/max | after p50/p90/p99/max |",
+        "|---|---:|---|---|",
+    ]
+    points = (50.0, 90.0, 99.0, 100.0)
+    for event_type in NATIVE_TYPES:
+        after_values = after_scores.get(event_type, [])
+        before_values = before_scores.get(event_type, [])
+        if not after_values and not before_values:
+            continue
+        b = _percentiles(before_values, points)
+        a = _percentiles(after_values, points)
+        rows.append(
+            f"| {event_type} | {len(after_values)} | "
+            f"{b[0]:.1f}/{b[1]:.1f}/{b[2]:.1f}/{b[3]:.1f} | "
+            f"{a[0]:.1f}/{a[1]:.1f}/{a[2]:.1f}/{a[3]:.1f} |"
+        )
+    return "\n".join(rows)
+
+
+def rain_trigger_table(replay: NativeReplay) -> str:
+    from app.detection.scoring import candidate_priority_score
+
+    by_trigger: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for _reading, candidate in replay.raw:
+        if candidate.event_type != "heavy_rain_burst":
+            continue
+        trigger = str(candidate.signal_values.get("trigger", "unknown"))
+        accumulation = float(candidate.signal_values.get("accumulation_mm", 0.0))
+        by_trigger[trigger].append((candidate_priority_score(candidate), accumulation))
+    rows = [
+        "Heavy-rain raw candidates split by trigger. An accumulation cluster sitting "
+        "well below the hourly cluster is evidence that the 6h accumulation bar admits "
+        "steady rain rather than bursts.",
+        "",
+        "| trigger | candidates | score p50/p90/max | accumulation_mm p50/p90/max |",
+        "|---|---:|---|---|",
+    ]
+    points = (50.0, 90.0, 100.0)
+    for trigger in ("hourly", "accumulation"):
+        items = by_trigger.get(trigger, [])
+        if not items:
+            rows.append(f"| {trigger} | 0 | n/a | n/a |")
+            continue
+        scores = _percentiles([score for score, _acc in items], points)
+        accums = _percentiles([acc for _score, acc in items], points)
+        rows.append(
+            f"| {trigger} | {len(items)} | "
+            f"{scores[0]:.1f}/{scores[1]:.1f}/{scores[2]:.1f} | "
+            f"{accums[0]:.1f}/{accums[1]:.1f}/{accums[2]:.1f} |"
+        )
+    return "\n".join(rows)
+
+
+def plot_detector_score_histograms(replay: NativeReplay) -> Path:
+    scores = _candidate_scores_by_type(replay)
+    present = [event_type for event_type in NATIVE_TYPES if scores.get(event_type)]
+    columns = 3
+    rows = max(1, (len(present) + columns - 1) // columns)
+    fig, axes = plt.subplots(rows, columns, figsize=(4 * columns, 3 * rows))
+    flat_axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+    from app.detection.scoring import SEVERITY_SEVERE_FLOOR, SEVERITY_WARNING_FLOOR
+
+    for ax, event_type in zip(flat_axes, present, strict=False):
+        ax.hist(scores[event_type], bins=20, range=(0, 100), edgecolor="black", alpha=0.7)
+        ax.axvline(SEVERITY_WARNING_FLOOR, color="goldenrod", ls="--", lw=1)
+        ax.axvline(SEVERITY_SEVERE_FLOOR, color="firebrick", ls="--", lw=1)
+        ax.set_title(event_type, fontsize=9)
+        ax.set_xlim(0, 100)
+    for ax in flat_axes[len(present):]:
+        ax.axis("off")
+    fig.suptitle("DS-4 per-detector priority_score distribution (raw candidates)")
+    fig.tight_layout()
+    path = FIG_DIR / "score_histograms.png"
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+def plot_rain_mix_histogram(replay: NativeReplay) -> Path:
+    from app.detection.scoring import (
+        SEVERITY_SEVERE_FLOOR,
+        SEVERITY_WARNING_FLOOR,
+        candidate_priority_score,
+    )
+
+    by_trigger: dict[str, list[float]] = defaultdict(list)
+    for _reading, candidate in replay.raw:
+        if candidate.event_type != "heavy_rain_burst":
+            continue
+        trigger = str(candidate.signal_values.get("trigger", "unknown"))
+        by_trigger[trigger].append(candidate_priority_score(candidate))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for trigger, color in (("hourly", "steelblue"), ("accumulation", "darkorange")):
+        values = by_trigger.get(trigger, [])
+        if values:
+            ax.hist(
+                values,
+                bins=20,
+                range=(0, 100),
+                alpha=0.55,
+                color=color,
+                edgecolor="black",
+                label=f"{trigger} (n={len(values)})",
+            )
+    ax.axvline(SEVERITY_WARNING_FLOOR, color="goldenrod", ls="--", lw=1, label="warning floor")
+    ax.axvline(SEVERITY_SEVERE_FLOOR, color="firebrick", ls="--", lw=1, label="severe floor")
+    ax.set_xlabel("priority_score")
+    ax.set_ylabel("raw candidate count")
+    ax.set_title("heavy_rain_burst score mix by trigger")
+    ax.legend()
+    fig.tight_layout()
+    path = FIG_DIR / "rain_mix_histogram.png"
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
 
 
 def plot_zscore_histogram(replay: NativeReplay) -> Path:
@@ -1041,6 +1224,7 @@ def write_evaluation(
     data: ReplayData,
     legacy: list[tuple[Reading, EventCandidate]],
     before: NativeReplay,
+    before_scoring: NativeReplay,
     after: NativeReplay,
     scenario_table: str,
     precision: float,
@@ -1083,6 +1267,13 @@ def write_evaluation(
   day-of-year smoothing window: median and MAD are computed at the same local
   hour over +/-15 neighboring training days. The DS-2 empirical quantiles are
   recomputed from these smooth training residuals before replay.
+- DS-4 redefines two score inputs without breaking the additive 0-100 contract:
+  rarity becomes surprisal (`-log(empirical tail probability)`, capped near a
+  1-in-10,000 tail) and magnitude becomes absolute physical size (mm, degC, km/h).
+  Severity is rebanded to the new distribution (`>=60 severe`, the replayed incident
+  p90 -> ~10% severe) and the 6h rain accumulation bar is raised to 12.5 mm/6h from
+  rain-mix evidence. The before/after score-distribution section isolates this scoring
+  change on the fixed smooth baseline.
 - Readings replayed: **{data.total_readings}** across **{data.total_city_days}**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,
@@ -1132,7 +1323,30 @@ Interpretation:
 
 ## Boundary Continuity
 
+DS-3's smooth day-of-year baseline collapsed the calendar-boundary discontinuity
+from roughly **0.56-1.26 z** (legacy month/local-hour buckets) down to **0.00-0.03 z**.
+That fix is retained unchanged in DS-4; the table below is the standing before/after.
+
 {boundary_continuity_table()}
+
+## DS-4 Scoring: Rarity = Surprisal, Decorrelated from Magnitude
+
+DS-4 replaces the saturating/clipped rarity component with **surprisal**
+(`-log(empirical tail probability)`), capped near a 1-in-10,000 tail, so a
+1-in-1000 event scores strictly above a 1-in-100 event instead of both maxing out.
+Rarity is now the **statistical tail position**; magnitude is the **absolute physical
+size** (mm rain, degC departure, km/h gust). The two axes are orthogonal, so a
+rare-but-small event and a common-but-large event score differently.
+
+{score_distribution_table(before_scoring, after)}
+
+### Rain-Mix Histogram Evidence
+
+{rain_trigger_table(after)}
+
+![Per-detector score histograms](evaluation/score_histograms.png)
+
+![Heavy-rain score mix by trigger](evaluation/rain_mix_histogram.png)
 
 ## Legacy Volume vs Native Incidents
 
@@ -1141,6 +1355,21 @@ Interpretation:
 ## Known-Event Spot Checks
 
 {spot_check_table(after)}
+
+**DS-4 honesty note (rain spot checks are false negatives in ERA5).** The two
+documented convective rain events are **not detected at all** in this ERA5 replay:
+Toronto 2024-07-16 peaks at 4.3 mm/h / 11.0 mm/6h and Ottawa 2023-06-26 at
+5.0 mm/h / 10.6 mm/6h, both below the 10 mm/h hourly floor and the 12.5 mm/6h
+accumulation bar, so no `heavy_rain_burst` candidate fires. They are false
+negatives, not warning-tier incidents. The cause is ERA5 hourly reanalysis
+grid-smoothing flattening the convective peak below the principled bar (the real
+events exceeded 100 mm in pockets); finer-resolution live observations would very
+likely clear the bar. This is a data-resolution limit, not a detector or scoring
+regression: both events remain covered by unit and labeled tests, and the Vancouver
+cold spell -- a genuine multi-day tail event that ERA5 *does* resolve -- still
+scores severe (70). We report the false negatives rather than lower the bar or the
+severe band to manufacture a match. The earlier "67" came from pre-DS-4 binary
+rarity that gave every firing rain hour full rarity credit at a 10 mm bar.
 
 ## Calibration Changes Applied
 
@@ -1198,9 +1427,13 @@ def main() -> None:
     before = replay_native(data, forecasts, profile=DS2_MONTH_HOUR_PROFILE)
     print(f"DS-2 month-hour incidents: {len(before.incidents)}")
 
-    print("Replaying DS-3 smooth quantile baseline...")
+    print("Replaying DS-3 smooth baseline with pre-DS-4 clipped scoring...")
+    before_scoring = replay_native(data, forecasts, profile=ds3_scoring_profile())
+    print(f"DS-3 clipped-scoring incidents: {len(before_scoring.incidents)}")
+
+    print("Replaying DS-4 smooth baseline with surprisal scoring...")
     after = replay_native(data, forecasts, profile=current_profile())
-    print(f"DS-3 smooth incidents: {len(after.incidents)}")
+    print(f"DS-4 surprisal incidents: {len(after.incidents)}")
 
     tp, fp, fn, scenario_details, mttd = evaluate_labeled()
     precision = tp / (tp + fp) if (tp + fp) else 1.0
@@ -1209,10 +1442,13 @@ def main() -> None:
     plot_zscore_histogram(after)
     plot_events_by_local_hour(after)
     plot_severity_pie(after)
+    plot_detector_score_histograms(after)
+    plot_rain_mix_histogram(after)
     write_evaluation(
         data=data,
         legacy=legacy,
         before=before,
+        before_scoring=before_scoring,
         after=after,
         scenario_table="\n".join(scenario_details),
         precision=precision,

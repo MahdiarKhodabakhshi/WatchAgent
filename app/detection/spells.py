@@ -8,10 +8,16 @@ from app.detection.native_common import (
     confidence_input,
     has_native_history,
     make_candidate,
+    surprisal_scoring_enabled,
+    z_rarity,
 )
 
 SPELL_Z = 3.0
 USE_EMPIRICAL_QUANTILE_GATES = True
+# Magnitude axis anchor: a severe outbreak departs ~12 degC from the smoothed
+# local-hour baseline. The departure is an absolute physical size, decoupled from
+# the statistical rarity (surprisal) axis.
+SPELL_MAGNITUDE_ANCHOR_C = 12.0
 
 
 @dataclass(frozen=True)
@@ -58,9 +64,17 @@ def _detect_spell(
 
     tail = "warm" if sign > 0 else "cold"
     abs_z = abs(z.z)
+    departure_c = 0.0 if z.median is None else abs(z.value - z.median)
+    legacy_magnitude = min(abs_z / 6.0, 1.0)
+    magnitude = (
+        min(departure_c / SPELL_MAGNITUDE_ANCHOR_C, 1.0)
+        if surprisal_scoring_enabled()
+        else legacy_magnitude
+    )
     signal_values = {
         "value": round(z.value, 3),
         "median": None if z.median is None else round(z.median, 3),
+        "departure_c": round(departure_c, 3),
         "z_score": round(abs_z, 3),
         "signed_z_score": round(z.z, 3),
         "threshold_z": round(abs(signed_threshold), 3),
@@ -82,8 +96,14 @@ def _detect_spell(
                 f"{z.value:.1f}C is {abs_z:.1f} sigma from the local-hour baseline."
             ),
             score_inputs={
-                "rarity": min(abs_z / 4.0, 1.0),
-                "magnitude": min(abs_z / 6.0, 1.0),
+                "rarity": z_rarity(
+                    climatology,
+                    "temperature_2m",
+                    z.z,
+                    tail="upper" if sign > 0 else "lower",
+                    legacy=min(abs_z / 4.0, 1.0),
+                ),
+                "magnitude": magnitude,
                 "persistence": min(abs_z / 4.0, 1.0),
                 "confidence": confidence_input(z.confidence),
             },

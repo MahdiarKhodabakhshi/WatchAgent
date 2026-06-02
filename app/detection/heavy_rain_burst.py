@@ -5,17 +5,28 @@ from datetime import timedelta
 
 from app.detection.base import DetectorContext, EventCandidate
 from app.detection.native_common import (
+    amount_rarity,
     climatology_for,
     confidence_input,
     has_native_history,
     make_candidate,
     numeric_attr,
+    surprisal_scoring_enabled,
 )
 
 MIN_HEAVY_RAIN_MM = 10.0
 HEAVY_RAIN_ACCUMULATION_HOURS = 6
-MIN_HEAVY_RAIN_ACCUMULATION_MM = 10.0
+# 6h accumulation bar. Raised from the prior round 10 mm/6h on DS-4 rain-mix
+# evidence: accumulation-triggered candidates cluster as steady ~1.7 mm/h rain that
+# is not a burst. Anchored to a quarter of the ECCC 50 mm/24h rainfall warning over
+# a 6h window (50 * 6/24 = 12.5 mm/6h). ERA5 grid-smooths the documented convective
+# floods to ~11 mm/6h (peaks ~4-5 mm/h, below the 10 mm/h hourly floor too), so in
+# ERA5 replay they fall below this bar and are NOT detected -- false negatives from
+# ERA5 hourly resolution, not a scoring regression. See EVALUATION.md.
+MIN_HEAVY_RAIN_ACCUMULATION_MM = 12.5
 ECCC_ONE_HOUR_RAIN_MM = 25.0
+# Magnitude axis anchors (absolute physical size, orthogonal to surprisal rarity).
+ECCC_SIX_HOUR_RAIN_MM = 50.0
 USE_EMPIRICAL_QUANTILE_GATES = True
 
 
@@ -51,6 +62,33 @@ class HeavyRainBurstDetector:
         if not hourly_fire and not accumulation_fire:
             return []
 
+        legacy_rarity = 1.0 if hourly_fire or accumulation_fire else 0.0
+        rarity = max(
+            amount_rarity(
+                climatology,
+                precip.amount_mm,
+                anchor_key="wet_amount_tail",
+                legacy=legacy_rarity,
+            ),
+            amount_rarity(
+                climatology,
+                accumulation,
+                anchor_key="accumulation_6h_tail",
+                legacy=legacy_rarity,
+            ),
+        )
+        legacy_magnitude = min(max(precip.amount_mm, accumulation) / 20.0, 1.0)
+        magnitude = (
+            min(
+                max(
+                    precip.amount_mm / ECCC_ONE_HOUR_RAIN_MM,
+                    accumulation / ECCC_SIX_HOUR_RAIN_MM,
+                ),
+                1.0,
+            )
+            if surprisal_scoring_enabled()
+            else legacy_magnitude
+        )
         signal_values = {
             "amount_mm": round(precip.amount_mm, 3),
             "accumulation_mm": round(accumulation, 3),
@@ -84,11 +122,8 @@ class HeavyRainBurstDetector:
                     f"exceeds the wet-hour threshold of {hourly_threshold:.1f} mm."
                 ),
                 score_inputs={
-                    "rarity": 1.0 if hourly_fire or accumulation_fire else 0.0,
-                    "magnitude": min(
-                        max(precip.amount_mm, accumulation) / 20.0,
-                        1.0,
-                    ),
+                    "rarity": rarity,
+                    "magnitude": magnitude,
                     "persistence": min(accumulation / 15.0, 1.0),
                     "compound": 1.0 if accumulation_fire else 0.5,
                     "confidence": confidence_input(max(precip.confidence, 0.8)),

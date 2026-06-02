@@ -8,6 +8,7 @@ from app.detection.native_common import (
     confidence_input,
     has_native_history,
     make_candidate,
+    z_rarity,
 )
 
 WIND_GUST_Z = 3.2
@@ -61,7 +62,13 @@ class WindGustBurstDetector:
                     f"{z.value:.1f} km/h is {z.z:.1f} sigma above the local-hour baseline."
                 ),
                 score_inputs={
-                    "rarity": min(max(z.z, 0.0) / 4.0, 1.0),
+                    "rarity": z_rarity(
+                        climatology,
+                        "wind_gusts_10m",
+                        max(z.z, 0.0),
+                        tail="upper",
+                        legacy=min(max(z.z, 0.0) / 4.0, 1.0),
+                    ),
                     "magnitude": min(z.value / ECCC_GUST_KMH, 1.0),
                     "confidence": confidence_input(z.confidence),
                 },

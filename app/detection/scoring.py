@@ -3,6 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+# priority_score blends two orthogonal axes plus supporting evidence:
+#   * rarity     -- statistical tail position (surprisal = -log tail probability)
+#   * magnitude  -- absolute physical size (mm rain, degC departure, km/h gust)
+# Rarity answers "how unusual" and magnitude answers "how big"; a rare-but-small
+# event and a common-but-large event therefore land at different scores.
 SCORE_WEIGHTS = {
     "rarity": 0.30,
     "magnitude": 0.20,
@@ -17,6 +22,17 @@ LEGACY_SEVERITY_SCORE = {
     "warning": 45.0,
     "severe": 70.0,
 }
+# Severity bands for the DS-4 surprisal score distribution. The severe floor is set
+# to the replayed incident score p90, so "severe" stays the rare top tier (~10% of
+# incidents = 10.2% at floor 60, versus 24% at 55) rather than a quarter of the feed.
+# Floor 60 coincides with the pre-DS-4 cut: DS-4 reshapes scores within the tier via
+# surprisal + absolute magnitude rather than moving the top-tier boundary.
+SEVERITY_WARNING_FLOOR = 30.0
+SEVERITY_SEVERE_FLOOR = 60.0
+# Replay/eval toggle. When False, detectors fall back to the pre-DS-4 clipped rarity
+# and z-based magnitude so the evaluation harness can measure the scoring change on a
+# fixed baseline. Production always runs with surprisal scoring enabled.
+SURPRISAL_SCORING = True
 
 
 def priority_score(
@@ -46,9 +62,9 @@ def candidate_priority_score(candidate: Any, *, duplicate_penalty: float = 0.0) 
 
 
 def severity_from_score(score: float) -> str:
-    if score < 30:
+    if score < SEVERITY_WARNING_FLOOR:
         return "info"
-    if score < 60:
+    if score < SEVERITY_SEVERE_FLOOR:
         return "warning"
     return "severe"
 
