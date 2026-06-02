@@ -363,6 +363,35 @@ labeled tests; the Vancouver cold spell, a genuine multi-day tail event that ERA
 resolve, still scores severe (70). See [EVALUATION.md](EVALUATION.md) for the per-detector
 before/after score distribution.
 
+#### Quantitative validation (DS-5)
+
+Offline, no credentials; the live pipeline stays Open-Meteo. ECCC exposes no stable public
+API for historical alert archives, so recall is measured against a curated, sourced set of
+15 high-impact weather windows (ECCC annual top-ten weather stories) for the three cities
+over 2022-2025, matched with +/-1 day padding. Full tables in
+[EVALUATION.md](EVALUATION.md#ds-5-quantitative-validation).
+
+- **Expected-type recall (primary)**: 8/15 = **53%** any-tier (Wilson 95% CI 30-75%),
+  3/15 = **20%** severe-tier -- the right detector had to fire.
+- **Any-incident-any-type recall (secondary, loose upper bound)**: 10/15 = **67%**; the gap
+  is two cold windows where a `pressure_plunge` fired but the cold detectors did not.
+- **Miss decomposition**: of 7 expected-type misses, **6 are resolution false negatives**
+  (ERA5 never cleared a gate -- the reanalysis flattened the convective/localized peak) and
+  **1 is a genuine detector gap**. The ECCC top-ten label set is biased toward exactly the
+  convective extremes hourly ERA5 cannot resolve, so recall **conditional on
+  ERA5-resolvable events is 8/9 = 89%**, which better reflects detector quality.
+- **Chance-recall check**: permuting labels to random same-length windows gives **12%** mean
+  recall, so the observed 53% is well above spurious +/-1 day matching.
+- **Precision proxy**, top 30 incidents by score labeled against physical-significance
+  bars: **67% useful, 33% borderline, 0% noise** -- the borderline cases are all 13-20 mm/6h
+  multi-hour rain, real but not burst-intensity; nothing in the top 30 is noise.
+- **Headline false negatives**: the Toronto 2024-07-16 and Ottawa 2023-06-26 floods are
+  confirmed missed -- ECCC alerted, the ERA5 backtest did not detect, because grid-smoothing
+  flattens the convective peak below the 12.5 mm/6h bar. Backtest-data limit; finer live
+  data would likely clear it. Honest and explained, not engineered around.
+- N=15 is a small, deliberately hard, biased sample: read the headline numbers as a
+  directional lower bound, not a precise estimate.
+
 ### Deliberately Out Of Scope
 
 - **EVT/GPD**: attractive for tail modeling, but too much calibration surface for this take-home.

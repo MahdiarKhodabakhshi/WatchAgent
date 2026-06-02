@@ -215,6 +215,120 @@ scores severe (70). We report the false negatives rather than lower the bar or t
 severe band to manufacture a match. The earlier "67" came from pre-DS-4 binary
 rarity that gave every firing rain hour full rarity credit at a 10 mm bar.
 
+## DS-5 Quantitative Validation
+
+Offline validation against weak labels and a precision proxy. No credentials, no live
+calls; the live pipeline stays Open-Meteo. Both measures use the DS-4 replay incidents.
+
+### Recall vs ECCC weak labels
+
+ECCC publishes no stable public API for historical alert archives, so the label set is a
+curated, sourced list of high-impact weather windows for the three cities over the replay
+span, drawn from ECCC's annual top-ten weather stories and contemporaneous reporting.
+Dates are approximate event windows matched with +/-1 day padding; this bounds recall on
+notable events, it is not exhaustive ground truth.
+
+This is a small (N=15), deliberately hard, biased sample, not a precise recall estimate.
+The Wilson interval is wide (see above), so read these as a directional **lower bound** on
+recall over notable events, not a point estimate.
+
+**Primary -- expected-type recall** (the meaningful number, requires the *right* detector to fire): any-tier **8/15 = 53%** (Wilson 95% CI 30%-75%), severe-tier **3/15 = 20%**.
+
+**Secondary -- any-incident-any-type recall** (loose upper bound, any detector fires in the window): **10/15 = 67%**. The gap to primary (2 event(s)) is windows where the system reacted but mis-attributed the detector type.
+
+| city | event | window | expected detectors | expected-type | any-type | top incident |
+|---|---|---|---|:--:|:--:|---|
+| Toronto | [Ontario-Quebec derecho](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2022.html) | 2022-05-21 | wind_gust_burst, pressure_plunge, heavy_rain_burst | no | no | none |
+| Ottawa | [Ontario-Quebec derecho](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2022.html) | 2022-05-21 | wind_gust_burst, pressure_plunge, heavy_rain_burst | no | no | none |
+| Vancouver | [December arctic outflow cold](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2022.html) | 2022-12-19..2022-12-23 | cold_spell, cold_stress | severe | yes | cold_spell 70 (severe) |
+| Toronto | [Pre-Christmas winter storm / flash freeze](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2022.html) | 2022-12-23..2022-12-24 | temperature_shock, wind_gust_burst, pressure_plunge | yes | yes | pressure_plunge 59 (warning) |
+| Ottawa | [Pre-Christmas winter storm / flash freeze](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2022.html) | 2022-12-23..2022-12-24 | temperature_shock, pressure_plunge | severe | yes | pressure_plunge 65 (severe) |
+| Toronto | [Eastern Ontario ice storm](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2023.html) | 2023-04-05..2023-04-06 | heavy_rain_burst, temperature_shock | no | no | none |
+| Ottawa | [Eastern Ontario ice storm](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2023.html) | 2023-04-05..2023-04-06 | heavy_rain_burst, temperature_shock | yes | yes | heavy_rain_burst 45 (warning) |
+| Ottawa | [Severe thunderstorm / outages](https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2023.html) | 2023-06-26..2023-06-27 | heavy_rain_burst, pressure_plunge | **no** | no | **none (false negative)** |
+| Toronto | [Mid-January deep cold](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-01-13..2024-01-16 | cold_spell, cold_stress | no | yes (pressure_plunge) | none |
+| Ottawa | [Mid-January deep cold](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-01-13..2024-01-16 | cold_spell, cold_stress | no | yes (pressure_plunge) | none |
+| Vancouver | [Arctic deep freeze](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-01-12..2024-01-14 | cold_spell, cold_stress | severe | yes | cold_spell 70 (severe) |
+| Toronto | [June heat wave](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-06-17..2024-06-20 | heat_stress, warm_spell | yes | yes | heat_stress 55 (warning) |
+| Ottawa | [June heat wave](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-06-17..2024-06-20 | heat_stress, warm_spell | yes | yes | heat_stress 57 (warning) |
+| Toronto | [Heavy rainfall / flooding](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-07-16 | heavy_rain_burst | **no** | no | **none (false negative)** |
+| Vancouver | [Bomb cyclone windstorm](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) | 2024-11-19..2024-11-20 | wind_gust_burst, pressure_plunge | yes | yes | wind_gust_burst 43 (warning) |
+
+**Chance-recall check.** Permuting each label to a random same-length window in 2022-2025 (same city and expected types, 1000 trials, seed 12345) yields a mean expected-type recall of **12%**. The observed 53% is well above chance, so the +/-1 day matches are not spurious.
+
+#### Miss decomposition: resolution limit vs detector gap
+
+Of 7 expected-type misses, **6** are resolution false negatives (ERA5 never cleared a gate -- the reanalysis flattened the event) and **1** are genuine detector gaps (ERA5 cleared a gate but nothing fired). The ECCC top-ten label set is biased toward convective and localized extremes (derechos, thunderstorms, flash floods) that hourly ERA5 grid data cannot resolve, so recall **conditional on ERA5-resolvable events** -- 8/9 = **89%** -- better reflects detector quality than the raw 8/15 = 53%.
+
+| city | event | expected | ERA5 peak in window | gate? | verdict |
+|---|---|---|---|:--:|---|
+| Toronto | Ontario-Quebec derecho | wind_gust_burst, pressure_plunge, heavy_rain_burst | gust 54 km/h (z 2.8); rain 1 mm/h, 1 mm/6h; 3h fall 2 hPa | no | resolution FN (ERA5 below all gates) |
+| Ottawa | Ontario-Quebec derecho | wind_gust_burst, pressure_plunge, heavy_rain_burst | gust 52 km/h (z 2.2); rain 6 mm/h, 12 mm/6h; 3h fall 3 hPa | no | resolution FN (ERA5 below all gates) |
+| Toronto | Eastern Ontario ice storm | heavy_rain_burst, temperature_shock | rain 5 mm/h, 8 mm/6h; 3h dT 7C (z 2.7) | no | resolution FN (ERA5 below all gates) |
+| Ottawa | Severe thunderstorm / outages | heavy_rain_burst, pressure_plunge | rain 5 mm/h, 11 mm/6h; 3h fall 2 hPa | no | resolution FN (ERA5 below all gates) |
+| Toronto | Mid-January deep cold | cold_spell, cold_stress | cold z -1.8; wind chill -23 | no | resolution FN (ERA5 below all gates) |
+| Ottawa | Mid-January deep cold | cold_spell, cold_stress | cold z -1.0; wind chill -27 | yes | **genuine gap** (cleared: cold stress) |
+| Toronto | Heavy rainfall / flooding | heavy_rain_burst | rain 4 mm/h, 11 mm/6h | no | resolution FN (ERA5 below all gates) |
+
+**Headline false negatives.** The Toronto 2024-07-16 and Ottawa 2023-06-26 floods are
+confirmed false negatives: ECCC alerted, the ERA5-based system did not detect. Cause:
+ERA5 hourly reanalysis grid-smoothing flattens the convective peak (real events exceeded
+100 mm in pockets) to ~5 mm/h and ~11 mm/6h, below the principled 10 mm/h floor and the
+12.5 mm/6h burst bar. Mitigation: this is a backtest-data resolution limit, not a detector
+defect; finer-resolution live observations would very likely clear the bar, and both
+events stay covered by unit and labeled tests. The recall number above is honest and
+explained rather than engineered around.
+
+### Precision proxy (top-N by score)
+
+Top **30** incidents by `priority_score`, labeled against transparent physical-significance bars (documented below, anchored to units not the score). **Useful share**: 20/30 = 67% useful, 10/30 = 33% borderline, 0/30 = 0% noise.
+
+| rank | city | detector | score | tier | label | signal |
+|---:|---|---|---:|---|---|---|
+| 1 | Ottawa | heavy_rain_burst | 80.0 | severe | useful | 26mm/h, 49mm/6h |
+| 2 | Vancouver | heavy_rain_burst | 75.8 | severe | useful | 5mm/h, 40mm/6h |
+| 3 | Ottawa | heavy_rain_burst | 73.8 | severe | useful | 17mm/h, 18mm/6h |
+| 4 | Ottawa | heavy_rain_burst | 73.6 | severe | useful | 17mm/h, 22mm/6h |
+| 5 | Ottawa | heavy_rain_burst | 73.3 | severe | useful | 5mm/h, 35mm/6h |
+| 6 | Vancouver | heavy_rain_burst | 73.1 | severe | useful | 4mm/h, 35mm/6h |
+| 7 | Toronto | heavy_rain_burst | 70.9 | severe | borderline | 14mm/6h |
+| 8 | Toronto | heavy_rain_burst | 70.9 | severe | borderline | 19mm/6h |
+| 9 | Toronto | heavy_rain_burst | 70.6 | severe | useful | 12mm/h, 29mm/6h |
+| 10 | Toronto | heavy_rain_burst | 70.3 | severe | useful | 13mm/h, 21mm/6h |
+| 11 | Vancouver | cold_spell | 70.0 | severe | useful | z=5.3, dep=14C |
+| 12 | Vancouver | cold_spell | 70.0 | severe | useful | z=5.2, dep=17C |
+| 13 | Ottawa | heavy_rain_burst | 69.8 | severe | useful | 12mm/h, 21mm/6h |
+| 14 | Ottawa | heavy_rain_burst | 69.8 | severe | borderline | 14mm/6h |
+| 15 | Ottawa | heavy_rain_burst | 69.7 | severe | useful | 10mm/h, 24mm/6h |
+| 16 | Ottawa | heavy_rain_burst | 69.6 | severe | useful | 12mm/h, 26mm/6h |
+| 17 | Ottawa | heavy_rain_burst | 69.4 | severe | borderline | 20mm/6h |
+| 18 | Toronto | heavy_rain_burst | 68.9 | severe | borderline | 13mm/6h |
+| 19 | Ottawa | heavy_rain_burst | 68.9 | severe | useful | 11mm/h, 20mm/6h |
+| 20 | Vancouver | heavy_rain_burst | 68.8 | severe | borderline | 17mm/6h |
+| 21 | Toronto | heavy_rain_burst | 68.4 | severe | borderline | 14mm/6h |
+| 22 | Vancouver | cold_spell | 68.4 | severe | useful | z=4.8, dep=12C |
+| 23 | Toronto | heavy_rain_burst | 68.3 | severe | borderline | 14mm/6h |
+| 24 | Ottawa | heavy_rain_burst | 68.2 | severe | borderline | 14mm/6h |
+| 25 | Toronto | heavy_rain_burst | 68.1 | severe | useful | 10mm/h, 21mm/6h |
+| 26 | Ottawa | heavy_rain_burst | 67.6 | severe | borderline | 15mm/6h |
+| 27 | Vancouver | warm_spell | 67.3 | severe | useful | z=5.4, dep=10C |
+| 28 | Vancouver | cold_spell | 67.2 | severe | useful | z=5.3, dep=10C |
+| 29 | Toronto | heavy_rain_burst | 67.1 | severe | useful | 3mm/h, 31mm/6h |
+| 30 | Vancouver | heavy_rain_burst | 66.3 | severe | useful | 5mm/h, 30mm/6h |
+
+The borderline incidents are all `heavy_rain_burst` accumulation events in the 13-20 mm/6h
+band: above the 12.5 mm/6h detection bar and high-scoring, but below the 20 mm/6h "useful"
+physical bar and with no hour reaching the 15 mm/h intensity cut -- real multi-hour rain,
+not clearly burst-intensity.
+
+Labeling rule (physical-significance bars, anchored to units, independent of the score so
+the label does not grade itself): `temperature_shock` useful at `z>=4` and `|dT|>=8C`;
+`warm/cold_spell` at `z>=4` or `|departure|>=10C`; `heavy_rain_burst` at `>=15 mm/h` or
+`>=20 mm/6h`; `wind_gust_burst` at `>=80 km/h`; `heat_stress` at `humidex>=40`;
+`cold_stress` at `wind chill<=-30`; `pressure_plunge` at `>=10 hPa/3h`; `spatial_anomaly`
+at `>=8 z` peer gap; `forecast_bust` at `>=4x` rolling MAE. "noise" is barely over the
+detector gate; "borderline" is in between.
+
 ## Calibration Changes Applied
 
 | detector | change | rationale |

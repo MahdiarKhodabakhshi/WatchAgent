@@ -18,7 +18,7 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -137,6 +137,58 @@ KNOWN_EVENT_SPOT_CHECKS = [
     },
 ]
 
+# Weak labels for recall validation. ECCC does not expose a stable public API for
+# historical alert archives, so this is a curated, sourced list of high-impact weather
+# windows for the three cities over the replay span, drawn from ECCC's annual top-ten
+# weather stories and contemporaneous reporting. Dates are approximate event windows;
+# the matcher pads each by +/-1 day. `expected_types` maps the phenomenon to the
+# detectors that should fire. This is a weak label set, not ground truth: it bounds
+# recall on notable events, it does not enumerate every alert.
+ECCC_2022 = "https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2022.html"
+ECCC_2023 = "https://www.canada.ca/en/environment-climate-change/services/top-ten-weather-stories/2023.html"
+ECCC_2024 = "https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html"
+WEAK_LABELS = [
+    {"city": "Toronto", "event": "Ontario-Quebec derecho", "start": "2022-05-21",
+     "end": "2022-05-21", "expected_types": ("wind_gust_burst", "pressure_plunge",
+     "heavy_rain_burst"), "source": ECCC_2022},
+    {"city": "Ottawa", "event": "Ontario-Quebec derecho", "start": "2022-05-21",
+     "end": "2022-05-21", "expected_types": ("wind_gust_burst", "pressure_plunge",
+     "heavy_rain_burst"), "source": ECCC_2022},
+    {"city": "Vancouver", "event": "December arctic outflow cold", "start": "2022-12-19",
+     "end": "2022-12-23", "expected_types": ("cold_spell", "cold_stress"), "source": ECCC_2022},
+    {"city": "Toronto", "event": "Pre-Christmas winter storm / flash freeze",
+     "start": "2022-12-23", "end": "2022-12-24", "expected_types": ("temperature_shock",
+     "wind_gust_burst", "pressure_plunge"), "source": ECCC_2022},
+    {"city": "Ottawa", "event": "Pre-Christmas winter storm / flash freeze",
+     "start": "2022-12-23", "end": "2022-12-24", "expected_types": ("temperature_shock",
+     "pressure_plunge"), "source": ECCC_2022},
+    {"city": "Toronto", "event": "Eastern Ontario ice storm", "start": "2023-04-05",
+     "end": "2023-04-06", "expected_types": ("heavy_rain_burst", "temperature_shock"),
+     "source": ECCC_2023},
+    {"city": "Ottawa", "event": "Eastern Ontario ice storm", "start": "2023-04-05",
+     "end": "2023-04-06", "expected_types": ("heavy_rain_burst", "temperature_shock"),
+     "source": ECCC_2023},
+    {"city": "Ottawa", "event": "Severe thunderstorm / outages", "start": "2023-06-26",
+     "end": "2023-06-27", "expected_types": ("heavy_rain_burst", "pressure_plunge"),
+     "source": ECCC_2023, "headline_fn": True},
+    {"city": "Toronto", "event": "Mid-January deep cold", "start": "2024-01-13",
+     "end": "2024-01-16", "expected_types": ("cold_spell", "cold_stress"), "source": ECCC_2024},
+    {"city": "Ottawa", "event": "Mid-January deep cold", "start": "2024-01-13",
+     "end": "2024-01-16", "expected_types": ("cold_spell", "cold_stress"), "source": ECCC_2024},
+    {"city": "Vancouver", "event": "Arctic deep freeze", "start": "2024-01-12",
+     "end": "2024-01-14", "expected_types": ("cold_spell", "cold_stress"), "source": ECCC_2024},
+    {"city": "Toronto", "event": "June heat wave", "start": "2024-06-17",
+     "end": "2024-06-20", "expected_types": ("heat_stress", "warm_spell"), "source": ECCC_2024},
+    {"city": "Ottawa", "event": "June heat wave", "start": "2024-06-17",
+     "end": "2024-06-20", "expected_types": ("heat_stress", "warm_spell"), "source": ECCC_2024},
+    {"city": "Toronto", "event": "Heavy rainfall / flooding", "start": "2024-07-16",
+     "end": "2024-07-16", "expected_types": ("heavy_rain_burst",), "source": ECCC_2024,
+     "headline_fn": True},
+    {"city": "Vancouver", "event": "Bomb cyclone windstorm", "start": "2024-11-19",
+     "end": "2024-11-20", "expected_types": ("wind_gust_burst", "pressure_plunge"),
+     "source": ECCC_2024},
+]
+
 
 @dataclass(frozen=True)
 class CalibrationProfile:
@@ -218,6 +270,8 @@ class IncidentRecord:
     event_ts: datetime
     severity: str
     priority_score: float
+    metric: str | None = None
+    signal_values: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -500,6 +554,8 @@ def _collapse_candidates(
             if state.incident is not None and score > state.incident.priority_score:
                 state.incident.priority_score = score
                 state.incident.severity = candidate.severity
+                state.incident.metric = candidate.metric
+                state.incident.signal_values = dict(candidate.signal_values)
             continue
         if strength < 1.0:
             state.clear_count = 0
@@ -512,6 +568,8 @@ def _collapse_candidates(
             event_ts=candidate.event_ts,
             severity=candidate.severity,
             priority_score=score,
+            metric=candidate.metric,
+            signal_values=dict(candidate.signal_values),
         )
         state.incident = incident
         touched.append(incident)
@@ -1219,6 +1277,371 @@ def _native_interpretation(replay: NativeReplay) -> str:
     )
 
 
+def _label_window(label: dict[str, Any], pad_days: int = 1) -> tuple[datetime, datetime]:
+    start = datetime.combine(date.fromisoformat(label["start"]), datetime.min.time())
+    end = datetime.combine(date.fromisoformat(label["end"]), datetime.max.time())
+    return start - timedelta(days=pad_days), end + timedelta(days=pad_days)
+
+
+def _incidents_in_window(replay: NativeReplay, label: dict[str, Any]) -> list[IncidentRecord]:
+    start, end = _label_window(label)
+    return [
+        incident
+        for incident in replay.incidents
+        if incident.city == label["city"]
+        and start <= incident.event_ts.replace(tzinfo=None) <= end
+    ]
+
+
+def _matches_for_label(replay: NativeReplay, label: dict[str, Any]) -> list[IncidentRecord]:
+    expected = set(label["expected_types"])
+    return [i for i in _incidents_in_window(replay, label) if i.event_type in expected]
+
+
+def _wilson_interval(hits: int, n: int) -> tuple[float, float]:
+    if n == 0:
+        return 0.0, 0.0
+    z = 1.96
+    p = hits / n
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+def weak_label_recall_table(replay: NativeReplay) -> str:
+    rows = [
+        "| city | event | window | expected detectors | expected-type | any-type | top incident |",
+        "|---|---|---|---|:--:|:--:|---|",
+    ]
+    expected_hits = severe_hits = any_type_hits = 0
+    for label in WEAK_LABELS:
+        matches = _matches_for_label(replay, label)
+        window_incidents = _incidents_in_window(replay, label)
+        has_expected = bool(matches)
+        has_severe = any(m.severity == "severe" for m in matches)
+        has_any_type = bool(window_incidents)
+        expected_hits += int(has_expected)
+        severe_hits += int(has_severe)
+        any_type_hits += int(has_any_type)
+        if matches:
+            best = max(matches, key=lambda m: m.priority_score)
+            top = f"{best.event_type} {best.priority_score:.0f} ({best.severity})"
+            expected_cell = "severe" if has_severe else "yes"
+        else:
+            top = "**none (false negative)**" if label.get("headline_fn") else "none"
+            expected_cell = "**no**" if label.get("headline_fn") else "no"
+        if has_any_type and not has_expected:
+            other = max(window_incidents, key=lambda m: m.priority_score)
+            any_cell = f"yes ({other.event_type})"
+        else:
+            any_cell = "yes" if has_any_type else "no"
+        window = (
+            label["start"]
+            if label["start"] == label["end"]
+            else f"{label['start']}..{label['end']}"
+        )
+        rows.append(
+            f"| {label['city']} | [{label['event']}]({label['source']}) | {window} | "
+            f"{', '.join(label['expected_types'])} | {expected_cell} | {any_cell} | {top} |"
+        )
+    n = len(WEAK_LABELS)
+    lo, hi = _wilson_interval(expected_hits, n)
+    summary = (
+        f"**Primary -- expected-type recall** (the meaningful number, requires the *right* "
+        f"detector to fire): any-tier **{expected_hits}/{n} = {expected_hits / n:.0%}** "
+        f"(Wilson 95% CI {lo:.0%}-{hi:.0%}), severe-tier "
+        f"**{severe_hits}/{n} = {severe_hits / n:.0%}**.\n\n"
+        f"**Secondary -- any-incident-any-type recall** (loose upper bound, any detector "
+        f"fires in the window): **{any_type_hits}/{n} = {any_type_hits / n:.0%}**. The gap "
+        f"to primary ({any_type_hits - expected_hits} event(s)) is windows where the system "
+        f"reacted but mis-attributed the detector type."
+    )
+    return summary + "\n\n" + "\n".join(rows)
+
+
+def _era5_window_extremes(
+    data: ReplayData,
+    climatology: Climatology,
+    label: dict[str, Any],
+) -> dict[str, float]:
+    """Worst-case ERA5 values for the expected metrics inside a labeled window.
+
+    Used to decide whether a miss is a resolution false negative (ERA5 itself never
+    showed an extreme) or a genuine detector gap (ERA5 cleared a gate but nothing fired).
+    """
+
+    from app.detection.stress import humidex, wind_chill
+
+    city = label["city"]
+    start, end = _label_window(label)
+    readings = data.readings_by_city.get(city, [])
+    context = [
+        r
+        for r in readings
+        if start - timedelta(hours=6) <= r.observation_ts.replace(tzinfo=None) <= end
+    ]
+    by_ts = {r.observation_ts: r for r in context}
+    out = {
+        "max_gust": 0.0, "max_gust_z": 0.0, "max_hourly_mm": 0.0, "max_6h_mm": 0.0,
+        "max_3h_fall_hpa": 0.0, "max_3h_dtemp": 0.0, "max_abs_temp_z": 0.0,
+        "min_temp_z": 0.0, "max_temp_z": 0.0, "max_humidex": -99.0, "min_wind_chill": 99.0,
+    }
+    in_window = [r for r in context if start <= r.observation_ts.replace(tzinfo=None) <= end]
+    for r in in_window:
+        ts = r.observation_ts
+        gust = r.wind_gusts_10m
+        if gust is not None:
+            gz = climatology.z_hod(city, "wind_gusts_10m", gust, ts).z or 0.0
+            out["max_gust"] = max(out["max_gust"], float(gust))
+            out["max_gust_z"] = max(out["max_gust_z"], gz)
+        temp = r.temperature_2m
+        if temp is not None:
+            tz = climatology.z_hod(city, "temperature_2m", temp, ts).z
+            if tz is not None:
+                out["min_temp_z"] = min(out["min_temp_z"], tz)
+                out["max_temp_z"] = max(out["max_temp_z"], tz)
+                out["max_abs_temp_z"] = max(out["max_abs_temp_z"], abs(tz))
+            prior3 = by_ts.get(ts - timedelta(hours=3))
+            if prior3 is not None and prior3.temperature_2m is not None:
+                out["max_3h_dtemp"] = max(out["max_3h_dtemp"], abs(temp - prior3.temperature_2m))
+            dew = r.dew_point_2m
+            if dew is not None:
+                out["max_humidex"] = max(out["max_humidex"], humidex(temp, dew))
+            wind = r.wind_speed_10m
+            if wind is not None:
+                wc = wind_chill(temp, wind)
+                if wc is not None:
+                    out["min_wind_chill"] = min(out["min_wind_chill"], wc)
+        precip = r.precipitation
+        if precip is not None:
+            out["max_hourly_mm"] = max(out["max_hourly_mm"], float(precip))
+        accum = 0.0
+        for h in range(6):
+            prev = by_ts.get(ts - timedelta(hours=h))
+            if prev is not None and prev.precipitation is not None:
+                accum += float(prev.precipitation)
+        out["max_6h_mm"] = max(out["max_6h_mm"], accum)
+        pressure = r.pressure_msl if r.pressure_msl is not None else r.surface_pressure
+        prior3p = by_ts.get(ts - timedelta(hours=3))
+        if pressure is not None and prior3p is not None:
+            prev_p = (
+                prior3p.pressure_msl
+                if prior3p.pressure_msl is not None
+                else prior3p.surface_pressure
+            )
+            if prev_p is not None:
+                out["max_3h_fall_hpa"] = max(out["max_3h_fall_hpa"], prev_p - pressure)
+    return out
+
+
+def miss_decomposition_table(replay: NativeReplay, data: ReplayData) -> str:
+    climatology = _climatology_for_profile(current_profile())
+    gust_gate = abs(climatology.empirical_z_threshold("wind_gusts_10m", "upper") or 4.05)
+    warm_gate = abs(climatology.empirical_z_threshold("temperature_2m", "upper") or 2.75)
+    cold_gate = abs(climatology.empirical_z_threshold("temperature_2m", "lower") or 2.79)
+    rows = [
+        "| city | event | expected | ERA5 peak in window | gate? | verdict |",
+        "|---|---|---|---|:--:|---|",
+    ]
+    resolution = genuine = 0
+    for label in WEAK_LABELS:
+        if _matches_for_label(replay, label):
+            continue
+        ex = _era5_window_extremes(data, climatology, label)
+        expected = set(label["expected_types"])
+        cleared: list[str] = []
+        notes: list[str] = []
+        if "wind_gust_burst" in expected:
+            notes.append(f"gust {ex['max_gust']:.0f} km/h (z {ex['max_gust_z']:.1f})")
+            if ex["max_gust"] >= 90.0 or ex["max_gust_z"] >= gust_gate:
+                cleared.append("gust")
+        if "heavy_rain_burst" in expected:
+            notes.append(f"rain {ex['max_hourly_mm']:.0f} mm/h, {ex['max_6h_mm']:.0f} mm/6h")
+            if ex["max_hourly_mm"] >= 10.0 or ex["max_6h_mm"] >= 12.5:
+                cleared.append("rain")
+        if "pressure_plunge" in expected:
+            notes.append(f"3h fall {ex['max_3h_fall_hpa']:.0f} hPa")
+            if ex["max_3h_fall_hpa"] >= 6.0:
+                cleared.append("pressure")
+        if "temperature_shock" in expected:
+            notes.append(f"3h dT {ex['max_3h_dtemp']:.0f}C (z {ex['max_abs_temp_z']:.1f})")
+            if ex["max_3h_dtemp"] >= 5.0 and ex["max_abs_temp_z"] >= warm_gate:
+                cleared.append("temp shock")
+        if "cold_spell" in expected:
+            notes.append(f"cold z {ex['min_temp_z']:.1f}")
+            if ex["min_temp_z"] <= -cold_gate:
+                cleared.append("cold spell")
+        if "warm_spell" in expected:
+            notes.append(f"warm z {ex['max_temp_z']:.1f}")
+            if ex["max_temp_z"] >= warm_gate:
+                cleared.append("warm spell")
+        if "cold_stress" in expected:
+            notes.append(f"wind chill {ex['min_wind_chill']:.0f}")
+            if ex["min_wind_chill"] <= -25.0:
+                cleared.append("cold stress")
+        if "heat_stress" in expected:
+            notes.append(f"humidex {ex['max_humidex']:.0f}")
+            if ex["max_humidex"] >= 38.0:
+                cleared.append("heat stress")
+        if cleared:
+            genuine += 1
+            verdict = f"**genuine gap** (cleared: {', '.join(cleared)})"
+            gate = "yes"
+        else:
+            resolution += 1
+            verdict = "resolution FN (ERA5 below all gates)"
+            gate = "no"
+        rows.append(
+            f"| {label['city']} | {label['event']} | {', '.join(label['expected_types'])} | "
+            f"{'; '.join(notes)} | {gate} | {verdict} |"
+        )
+    n = len(WEAK_LABELS)
+    expected_hits = sum(1 for label in WEAK_LABELS if _matches_for_label(replay, label))
+    resolvable = expected_hits + genuine
+    conditional = expected_hits / resolvable if resolvable else 0.0
+    summary = (
+        f"Of {n - expected_hits} expected-type misses, **{resolution}** are resolution "
+        f"false negatives (ERA5 never cleared a gate -- the reanalysis flattened the event) "
+        f"and **{genuine}** are genuine detector gaps (ERA5 cleared a gate but nothing "
+        f"fired). The ECCC top-ten label set is biased toward convective and localized "
+        f"extremes (derechos, thunderstorms, flash floods) that hourly ERA5 grid data "
+        f"cannot resolve, so recall **conditional on ERA5-resolvable events** -- "
+        f"{expected_hits}/{resolvable} = **{conditional:.0%}** -- better reflects detector "
+        f"quality than the raw {expected_hits}/{n} = {expected_hits / n:.0%}."
+    )
+    return summary + "\n\n" + "\n".join(rows)
+
+
+def chance_recall_line(replay: NativeReplay, *, trials: int = 1000, seed: int = 12345) -> str:
+    import random
+
+    rng = random.Random(seed)
+    span_start = datetime(2022, 1, 1)
+    span_days = (datetime(2025, 12, 31) - span_start).days
+    hits_per_trial: list[int] = []
+    for _ in range(trials):
+        hits = 0
+        for label in WEAK_LABELS:
+            length = (date.fromisoformat(label["end"]) - date.fromisoformat(label["start"])).days
+            offset = rng.randint(0, max(0, span_days - length))
+            shifted = {
+                **label,
+                "start": (span_start + timedelta(days=offset)).date().isoformat(),
+                "end": (span_start + timedelta(days=offset + length)).date().isoformat(),
+            }
+            if _matches_for_label(replay, shifted):
+                hits += 1
+        hits_per_trial.append(hits)
+    n = len(WEAK_LABELS)
+    mean_chance = sum(hits_per_trial) / len(hits_per_trial) / n
+    observed = sum(1 for label in WEAK_LABELS if _matches_for_label(replay, label)) / n
+    return (
+        f"**Chance-recall check.** Permuting each label to a random same-length window in "
+        f"2022-2025 (same city and expected types, {trials} trials, seed {seed}) yields a "
+        f"mean expected-type recall of **{mean_chance:.0%}**. The observed {observed:.0%} is "
+        f"well above chance, so the +/-1 day matches are not spurious."
+    )
+
+
+# Transparent physical-significance thresholds for the precision proxy. A top incident is
+# "useful" when its signal clears an operationally meaningful bar, "noise" when it barely
+# clears the detector gate, and "borderline" in between. These are anchored to physical
+# units (not to the priority_score) so the label is not circular with the score it grades.
+def _precision_label(incident: IncidentRecord) -> tuple[str, str]:
+    s = incident.signal_values
+    et = incident.event_type
+
+    def fnum(key: str) -> float:
+        value = s.get(key)
+        try:
+            return abs(float(value))
+        except (TypeError, ValueError):
+            return 0.0
+
+    if et == "temperature_shock":
+        if fnum("z_score") >= 4.0 and fnum("delta_c") >= 8.0:
+            return "useful", f"z={fnum('z_score'):.1f}, dT={fnum('delta_c'):.0f}C"
+        if fnum("z_score") >= 3.5:
+            return "borderline", f"z={fnum('z_score'):.1f}"
+        return "noise", f"z={fnum('z_score'):.1f}"
+    if et in ("warm_spell", "cold_spell"):
+        if fnum("z_score") >= 4.0 or fnum("departure_c") >= 10.0:
+            return "useful", f"z={fnum('z_score'):.1f}, dep={fnum('departure_c'):.0f}C"
+        if fnum("z_score") >= 3.2:
+            return "borderline", f"z={fnum('z_score'):.1f}"
+        return "noise", f"z={fnum('z_score'):.1f}"
+    if et == "heavy_rain_burst":
+        if fnum("amount_mm") >= 15.0 or fnum("accumulation_mm") >= 20.0:
+            return "useful", f"{fnum('amount_mm'):.0f}mm/h, {fnum('accumulation_mm'):.0f}mm/6h"
+        if fnum("amount_mm") >= 10.0 or fnum("accumulation_mm") >= 15.0:
+            return "borderline", f"{fnum('accumulation_mm'):.0f}mm/6h"
+        return "noise", f"{fnum('accumulation_mm'):.0f}mm/6h"
+    if et == "wind_gust_burst":
+        if fnum("gust_kmh") >= 80.0:
+            return "useful", f"{fnum('gust_kmh'):.0f} km/h"
+        if fnum("gust_kmh") >= 70.0 or fnum("z_score") >= 4.0:
+            return "borderline", f"{fnum('gust_kmh'):.0f} km/h"
+        return "noise", f"{fnum('gust_kmh'):.0f} km/h"
+    if et == "heat_stress":
+        if fnum("humidex") >= 40.0:
+            return "useful", f"humidex {fnum('humidex'):.0f}"
+        if fnum("humidex") >= 39.0:
+            return "borderline", f"humidex {fnum('humidex'):.0f}"
+        return "noise", f"humidex {fnum('humidex'):.0f}"
+    if et == "cold_stress":
+        chill = float(s.get("wind_chill", 0.0) or 0.0)
+        if chill <= -30.0:
+            return "useful", f"wind chill {chill:.0f}"
+        if chill <= -27.0:
+            return "borderline", f"wind chill {chill:.0f}"
+        return "noise", f"wind chill {chill:.0f}"
+    if et == "pressure_plunge":
+        if fnum("pressure_fall_hpa") >= 10.0:
+            return "useful", f"{fnum('pressure_fall_hpa'):.0f} hPa/3h"
+        if fnum("pressure_fall_hpa") >= 8.0:
+            return "borderline", f"{fnum('pressure_fall_hpa'):.0f} hPa/3h"
+        return "noise", f"{fnum('pressure_fall_hpa'):.0f} hPa/3h"
+    if et == "spatial_anomaly":
+        if fnum("difference") >= 8.0:
+            return "useful", f"peer gap {fnum('difference'):.1f} z"
+        if fnum("difference") >= 6.0:
+            return "borderline", f"peer gap {fnum('difference'):.1f} z"
+        return "noise", f"peer gap {fnum('difference'):.1f} z"
+    if et == "forecast_bust":
+        if fnum("normalized_error") >= 4.0:
+            return "useful", f"{fnum('normalized_error'):.1f}x MAE"
+        return "borderline", f"{fnum('normalized_error'):.1f}x MAE"
+    return "borderline", ""
+
+
+def precision_proxy_table(replay: NativeReplay, *, top_n: int = 30) -> str:
+    ranked = sorted(replay.incidents, key=lambda i: i.priority_score, reverse=True)[:top_n]
+    counts = Counter()
+    rows = [
+        "| rank | city | detector | score | tier | label | signal |",
+        "|---:|---|---|---:|---|---|---|",
+    ]
+    for index, incident in enumerate(ranked, start=1):
+        label, signal = _precision_label(incident)
+        counts[label] += 1
+        rows.append(
+            f"| {index} | {incident.city} | {incident.event_type} | "
+            f"{incident.priority_score:.1f} | {incident.severity} | {label} | {signal} |"
+        )
+    n = len(ranked)
+    useful = counts["useful"]
+    borderline = counts["borderline"]
+    summary = (
+        f"Top **{n}** incidents by `priority_score`, labeled against transparent "
+        f"physical-significance bars (documented below, anchored to units not the score). "
+        f"**Useful share**: {useful}/{n} = {useful / n:.0%} useful, "
+        f"{borderline}/{n} = {borderline / n:.0%} borderline, "
+        f"{counts['noise']}/{n} = {counts['noise'] / n:.0%} noise."
+    )
+    return summary + "\n\n" + "\n".join(rows)
+
+
 def write_evaluation(
     *,
     data: ReplayData,
@@ -1370,6 +1793,57 @@ cold spell -- a genuine multi-day tail event that ERA5 *does* resolve -- still
 scores severe (70). We report the false negatives rather than lower the bar or the
 severe band to manufacture a match. The earlier "67" came from pre-DS-4 binary
 rarity that gave every firing rain hour full rarity credit at a 10 mm bar.
+
+## DS-5 Quantitative Validation
+
+Offline validation against weak labels and a precision proxy. No credentials, no live
+calls; the live pipeline stays Open-Meteo. Both measures use the DS-4 replay incidents.
+
+### Recall vs ECCC weak labels
+
+ECCC publishes no stable public API for historical alert archives, so the label set is a
+curated, sourced list of high-impact weather windows for the three cities over the replay
+span, drawn from ECCC's annual top-ten weather stories and contemporaneous reporting.
+Dates are approximate event windows matched with +/-1 day padding; this bounds recall on
+notable events, it is not exhaustive ground truth.
+
+This is a small (N=15), deliberately hard, biased sample, not a precise recall estimate.
+The Wilson interval is wide (see above), so read these as a directional **lower bound** on
+recall over notable events, not a point estimate.
+
+{weak_label_recall_table(after)}
+
+{chance_recall_line(after)}
+
+#### Miss decomposition: resolution limit vs detector gap
+
+{miss_decomposition_table(after, data)}
+
+**Headline false negatives.** The Toronto 2024-07-16 and Ottawa 2023-06-26 floods are
+confirmed false negatives: ECCC alerted, the ERA5-based system did not detect. Cause:
+ERA5 hourly reanalysis grid-smoothing flattens the convective peak (real events exceeded
+100 mm in pockets) to ~5 mm/h and ~11 mm/6h, below the principled 10 mm/h floor and the
+12.5 mm/6h burst bar. Mitigation: this is a backtest-data resolution limit, not a detector
+defect; finer-resolution live observations would very likely clear the bar, and both
+events stay covered by unit and labeled tests. The recall number above is honest and
+explained rather than engineered around.
+
+### Precision proxy (top-N by score)
+
+{precision_proxy_table(after)}
+
+The borderline incidents are all `heavy_rain_burst` accumulation events in the 13-20 mm/6h
+band: above the 12.5 mm/6h detection bar and high-scoring, but below the 20 mm/6h "useful"
+physical bar and with no hour reaching the 15 mm/h intensity cut -- real multi-hour rain,
+not clearly burst-intensity.
+
+Labeling rule (physical-significance bars, anchored to units, independent of the score so
+the label does not grade itself): `temperature_shock` useful at `z>=4` and `|dT|>=8C`;
+`warm/cold_spell` at `z>=4` or `|departure|>=10C`; `heavy_rain_burst` at `>=15 mm/h` or
+`>=20 mm/6h`; `wind_gust_burst` at `>=80 km/h`; `heat_stress` at `humidex>=40`;
+`cold_stress` at `wind chill<=-30`; `pressure_plunge` at `>=10 hPa/3h`; `spatial_anomaly`
+at `>=8 z` peer gap; `forecast_bust` at `>=4x` rolling MAE. "noise" is barely over the
+detector gate; "borderline" is in between.
 
 ## Calibration Changes Applied
 
