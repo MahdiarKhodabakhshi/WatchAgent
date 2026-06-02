@@ -64019,6 +64019,88 @@
     "end": "2021-12-31",
     "start": "2015-01-01"
   },
+  "empirical_thresholds": {
+    "lower_quantile": 0.5,
+    "method": "Training-window empirical residual quantiles after city/month/local-hour median-MAD standardization; precipitation amount uses wet hours only.",
+    "metrics": {
+      "apparent_temperature": {
+        "abs_z": 3.1272,
+        "lower_z": -2.8528,
+        "n": 184104,
+        "upper_z": 2.7267
+      },
+      "cloud_cover": {
+        "abs_z": 19.6,
+        "lower_z": -19.6,
+        "n": 184104,
+        "upper_z": 2.5248
+      },
+      "dew_point_2m": {
+        "abs_z": 3.4989,
+        "lower_z": -3.4946,
+        "n": 184104,
+        "upper_z": 2.3075
+      },
+      "precipitation": {
+        "abs_z": 32.0,
+        "lower_z": 0.0,
+        "n": 184104,
+        "upper_z": 32.0,
+        "wet_amount_mm": 5.0,
+        "wet_count": 37458
+      },
+      "pressure_msl": {
+        "abs_z": 2.9856,
+        "lower_z": -2.9003,
+        "n": 184104,
+        "upper_z": 2.3732
+      },
+      "relative_humidity_2m": {
+        "abs_z": 3.8221,
+        "lower_z": -3.7771,
+        "n": 184104,
+        "upper_z": 2.623
+      },
+      "snow_depth": {
+        "abs_z": 24.0,
+        "lower_z": -1.5292,
+        "n": 184104,
+        "upper_z": 24.0
+      },
+      "snowfall": {
+        "abs_z": 6.3,
+        "lower_z": 0.0,
+        "n": 184104,
+        "upper_z": 6.3
+      },
+      "surface_pressure": {
+        "abs_z": 3.0008,
+        "lower_z": -2.9155,
+        "n": 184104,
+        "upper_z": 2.3737
+      },
+      "temperature_2m": {
+        "abs_z": 3.266,
+        "lower_z": -2.9375,
+        "n": 184104,
+        "upper_z": 2.7943
+      },
+      "wind_gusts_10m": {
+        "abs_z": 4.0639,
+        "lower_z": -1.6862,
+        "n": 184104,
+        "upper_z": 4.0639
+      },
+      "wind_speed_10m": {
+        "abs_z": 4.168,
+        "lower_z": -1.8211,
+        "n": 184104,
+        "upper_z": 4.168
+      }
+    },
+    "tail_probability": 0.005,
+    "upper_quantile": 99.5
+  },
   "fallbacks": {
     "city": {
       "Ottawa": {

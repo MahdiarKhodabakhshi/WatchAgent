@@ -14,6 +14,7 @@ from app.features import median, peer_z_values
 SPATIAL_Z_GAP = 5.0
 SPATIAL_MIN_OWN_Z = 3.0
 SPATIAL_METRICS = ("temperature_2m", "wind_gusts_10m", "pressure_msl")
+USE_EMPIRICAL_QUANTILE_GATES = True
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,12 @@ class SpatialAnomalyDetector:
             if current_z.z is None:
                 continue
             own_abs_z = abs(current_z.z)
-            if own_abs_z < SPATIAL_MIN_OWN_Z:
+            own_threshold, threshold_source = _own_z_threshold(
+                climatology,
+                metric,
+                current_z.z,
+            )
+            if own_threshold is None or own_abs_z < own_threshold:
                 continue
 
             peers = peer_z_values(ctx.peers, metric, climatology)
@@ -57,6 +63,9 @@ class SpatialAnomalyDetector:
             signal_values = {
                 "z_score": round(own_abs_z, 3),
                 "signed_z_score": round(current_z.z, 3),
+                "threshold_z": round(own_threshold, 3),
+                "threshold_source": threshold_source,
+                "threshold_quantile": climatology.empirical_upper_quantile,
                 "peer_median_z": round(peer_median, 3),
                 "difference": round(z_gap, 3),
                 "peer_count": len(usable_peer_z),
@@ -82,3 +91,15 @@ class SpatialAnomalyDetector:
                 )
             )
         return events
+
+
+def _own_z_threshold(climatology, metric: str, signed_z: float) -> tuple[float | None, str]:
+    if not USE_EMPIRICAL_QUANTILE_GATES:
+        return SPATIAL_MIN_OWN_Z, "fixed_z"
+    if metric == "wind_gusts_10m" and signed_z < 0:
+        return None, "upper_tail_only"
+    tail = "upper" if signed_z >= 0 else "lower"
+    threshold = climatology.empirical_z_threshold(metric, tail)
+    if threshold is None:
+        return SPATIAL_MIN_OWN_Z, "fixed_z_fallback"
+    return abs(threshold), f"training_{tail}_quantile"

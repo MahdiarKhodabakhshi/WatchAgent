@@ -172,9 +172,10 @@ lifecycle/scoring fields are additive.
       "severity": "severe",
       "metric": "precipitation",
       "signal_values": {
-        "precipitation_mm": 4.4,
+        "amount_mm": 4.4,
         "accumulation_mm": 11.0,
-        "wet_hour_p95_mm": 10.0
+        "wet_hour_quantile_mm": 5.0,
+        "threshold_source": "training_wet_hour_upper_quantile"
       },
       "reason": "Toronto's rain accumulation reached 11.0 mm over 6h during a wet hour.",
       "supporting_reading_ids": [101, 102, 103],
@@ -209,18 +210,18 @@ spatial separation, and confidence. `priority_score` is a weighted 0-100 value, 
 
 ### Detector Catalog
 
-| detector | phenomenon | statistic | initial threshold and calibration hypothesis |
+| detector | phenomenon | statistic | threshold and calibration hypothesis |
 |---|---|---|---|
-| `temperature_shock` | Sudden temperature jumps that are unusual for that city and hour. | Local-hour `z_hod` plus a 3-hour temperature derivative. | `abs(z_hod) >= 3.0` and `abs(delta_3h) >= 5C`. This preserves the useful diurnal-aware baseline from the old rapid-change rule while filtering routine afternoon warming. |
+| `temperature_shock` | Sudden temperature jumps that are unusual for that city and hour. | Local-hour `z_hod` plus a 3-hour temperature derivative. | Temperature residual must exceed the training artifact's empirical 99.5th upper tail or 0.5th lower tail (`+2.79/-2.94 z` in the current 2015-2021 artifact) and `abs(delta_3h) >= 5C`. This preserves the useful diurnal-aware baseline from the old rapid-change rule while dropping the shared `z=3` assumption. |
 | `pressure_plunge` | Pressure falls that often precede stormy conditions. | 3-hour sea-level pressure fall, checked against local pressure behavior and confirmed by wind/gust rise. | At least a 6 hPa fall plus wind corroboration. Replay showed weaker falls were ordinary weather noise, so the threshold keeps only sharper, compound signals. |
-| `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod >= 3.0`. This replaces spammy `sustained_extreme`; in the 2022-2025 test replay, 67,513 old raw firings became 172 warm/cold spell incidents. |
-| `cold_spell` | Persistent locally extreme cold. | Temperature `z_hod` below the local-hour climatology, collapsed by lifecycle hysteresis. | `z_hod <= -3.0`. The same spell hypothesis as warm spells, with score magnitude lifting extreme cold outbreaks to severe. |
-| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount at least `max(wet p95, 10 mm)`, or 6-hour accumulation at least 10 mm. The wet/dry split avoids zero-dominated medians; Toronto/Ottawa flood spot checks drove the accumulation scoring. |
-| `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | `z_hod >= 3.2` or gust around 90 km/h. The replay rate landed near other direct hazard detectors after raising the z threshold. |
+| `warm_spell` | Persistent locally extreme warmth. | Temperature `z_hod` above the local-hour climatology, collapsed by lifecycle hysteresis. | Temperature residual above the empirical 99.5th training tail (`+2.79 z`). This replaces spammy `sustained_extreme`; in the 2022-2025 test replay, 67,513 old raw firings became 204 warm/cold spell incidents. |
+| `cold_spell` | Persistent locally extreme cold. | Temperature `z_hod` below the local-hour climatology, collapsed by lifecycle hysteresis. | Temperature residual below the empirical 0.5th training tail (`-2.94 z`). The same rare-tail spell hypothesis as warm spells, with score magnitude lifting extreme cold outbreaks to severe. |
+| `heavy_rain_burst` | Flash-flood style rain bursts and short accumulations. | Current hour must be wet; compare wet-hour amount and 6-hour accumulation against wet-hour-only baselines. | Wet current hour, hourly amount above the training wet-hour 99.5th percentile (`5.0 mm` in the artifact), or 6-hour accumulation at least `max(wet-tail threshold, 10 mm)`. The wet/dry split avoids zero-dominated medians; the quantile is fixed before replay, not tuned to hit a rate. |
+| `wind_gust_burst` | Locally unusual gusts with operational damage potential. | `wind_gusts_10m` anomaly against local-hour climatology, with an ECCC-scale absolute gust anchor. | Gust residual above the empirical 99.5th training tail (`+4.06 z`) or gust around 90 km/h. Gusts are one-sided upper-tail hazards. |
 | `heat_stress` | Dangerous heat load from temperature plus moisture. | Humidex from temperature and dew point. | Humidex `>= 38`, with Humidex 40 as a strong anchor. Full-season replay produced non-trivial but not constant summer incidents. |
 | `cold_stress` | Dangerous wind chill from cold plus wind. | Wind Chill Index from temperature and wind speed. | Wind chill `<= -25` with valid cold/wind inputs. City-center archive data made `-30` effectively dead, so `-25` keeps real winter stress visible. |
 | `forecast_bust` | A live forecast miss large enough to matter operationally. | `abs(observed - stored_forecast) / max(global rolling MAE, metric_floor)`. | Normalized error `>= 2.5` with at least 3 recent obs/forecast comparison pairs. Archive replay has no historical forecast pairs, so this is exercised by unit/labeled tests and live DB operation. |
-| `spatial_anomaly` | One city is anomalous relative to its own climate and its peers. | Own-city `z_hod`, then gap from median peer `z_hod` across temperature, gust, and pressure. | Own `abs(z_hod) >= 3.0` and peer z-gap `>= 5.0`. This prevents "normal Vancouver mildness while Ottawa freezes" from counting as an event; geography alone is not a hazard. |
+| `spatial_anomaly` | One city is anomalous relative to its own climate and its peers. | Own-city `z_hod`, then gap from median peer `z_hod` across temperature, gust, and pressure. | Own metric must first exceed that metric's empirical training tail, then peer z-gap must be `>= 5.0`. Wind-gust spatial checks are upper-tail only. This prevents "normal Vancouver mildness while Ottawa freezes" from counting as an event; geography alone is not a hazard. |
 
 `wmo_transition` is no longer a primary event. WMO weather-code tier changes are treated as
 supporting evidence where useful instead of a spammy feed item.
@@ -233,6 +234,9 @@ supporting evidence where useful instead of a spammy feed item.
   creating infinite z-scores.
 - **Local-hour buckets**: climatology is keyed by `(city, month, local_hour)` using each
   city's timezone, avoiding UTC-smearing of the diurnal cycle.
+- **Empirical tail gates**: z-scores remain diagnostic, but z-gated detectors enter on
+  per-metric training quantiles. The shared `z=3` rule is retired because each metric's
+  residual distribution has its own asymmetry and tail width.
 - **Precip occurrence vs amount**: dry hours are modeled separately from wet-hour amount
   percentiles, so heavy rain is not compared to a zero-dominated median.
 - **Lifecycle hysteresis**: incidents open after enter criteria and resolve only after clear
@@ -254,31 +258,32 @@ The replayable evidence lives in [EVALUATION.md](EVALUATION.md):
 python3 scripts/evaluate.py --source archive --start-date 2022-01-01 --end-date 2025-12-31
 ```
 
-Current DS-1 replay uses the committed 2015-2021 climatology artifact as training data and
-measures rates on the disjoint 2022-2025 archive test window. This removes train/test leakage,
-while acknowledging that a fixed historical climate baseline can drift as climate and observing
-systems change.
+Current DS-2 replay uses the committed 2015-2021 climatology artifact as training data and
+measures rates on the disjoint 2022-2025 archive test window. Empirical threshold quantiles are
+read from the training artifact only: upper 99.5th tails, lower 0.5th tails, and wet-hour-only
+99.5th percentile rain amount. The quantile level is a fixed rare-tail hypothesis, not tuned to
+hit an event-rate target.
 
 - Legacy raw detector firings: **127,164**
-- Native lifecycle incidents: **1,121**
-- Overall rate: **0.256 incidents/city-day**
-- Raw-firing to incident collapse ratio: **4.33x** on native candidates
-- `sustained_extreme` replacement: **67,513 raw firings -> 172 spell incidents**
+- Native lifecycle incidents: **1,001**
+- Overall rate: **0.228 incidents/city-day**
+- Raw-firing to incident collapse ratio: **4.42x** on native candidates
+- `sustained_extreme` replacement: **67,513 raw firings -> 204 spell incidents**
 
 Per-type after-state:
 
 | detector_type | incidents | per_city_day |
 |---|---:|---:|
-| `temperature_shock` | 21 | 0.005 |
+| `temperature_shock` | 30 | 0.007 |
 | `pressure_plunge` | 52 | 0.012 |
-| `warm_spell` | 101 | 0.023 |
-| `cold_spell` | 71 | 0.016 |
-| `heavy_rain_burst` | 333 | 0.076 |
-| `wind_gust_burst` | 334 | 0.076 |
+| `warm_spell` | 127 | 0.029 |
+| `cold_spell` | 77 | 0.018 |
+| `heavy_rain_burst` | 375 | 0.086 |
+| `wind_gust_burst` | 132 | 0.030 |
 | `heat_stress` | 53 | 0.012 |
 | `cold_stress` | 70 | 0.016 |
 | `forecast_bust` | 0 | 0.000 |
-| `spatial_anomaly` | 86 | 0.020 |
+| `spatial_anomaly` | 85 | 0.019 |
 
 Forecast-bust is zero in archive replay because Open-Meteo archive provides observations, not
 the forecasts issued at the time. The detector fires in

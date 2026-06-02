@@ -14,6 +14,7 @@ from app.features import k_hour_delta
 TEMPERATURE_SHOCK_Z = 3.0
 TEMPERATURE_SHOCK_DELTA_C = 5.0
 TEMPERATURE_SHOCK_HOURS = 3
+USE_EMPIRICAL_QUANTILE_GATES = True
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,8 @@ class TemperatureShockDetector:
 
         abs_z = abs(z.z)
         abs_delta = abs(delta.delta)
-        if abs_z < TEMPERATURE_SHOCK_Z or abs_delta < TEMPERATURE_SHOCK_DELTA_C:
+        z_threshold, threshold_source = _z_threshold(climatology, z.z)
+        if abs_z < z_threshold or abs_delta < TEMPERATURE_SHOCK_DELTA_C:
             return []
 
         direction = "warming" if delta.delta > 0 else "cooling"
@@ -56,6 +58,9 @@ class TemperatureShockDetector:
             "scale": None if z.scale is None else round(z.scale, 3),
             "z_score": round(abs_z, 3),
             "signed_z_score": round(z.z, 3),
+            "threshold_z": round(z_threshold, 3),
+            "threshold_source": threshold_source,
+            "threshold_quantile": climatology.empirical_upper_quantile,
             "delta_c": round(delta.delta, 3),
             "delta_hours": TEMPERATURE_SHOCK_HOURS,
             "direction": direction,
@@ -87,4 +92,14 @@ class TemperatureShockDetector:
                     if getattr(item, "id", None) == delta.previous_reading_id
                 ],
             )
-        ]
+    ]
+
+
+def _z_threshold(climatology, signed_z: float) -> tuple[float, str]:
+    if not USE_EMPIRICAL_QUANTILE_GATES:
+        return TEMPERATURE_SHOCK_Z, "fixed_z"
+    tail = "upper" if signed_z >= 0 else "lower"
+    threshold = climatology.empirical_z_threshold("temperature_2m", tail)
+    if threshold is None:
+        return TEMPERATURE_SHOCK_Z, "fixed_z_fallback"
+    return abs(threshold), f"training_{tail}_quantile"

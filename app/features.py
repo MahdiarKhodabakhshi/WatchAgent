@@ -13,6 +13,8 @@ from app.detection.timeofday import local_hour, local_month
 DEFAULT_CLIMATOLOGY_PATH = Path(__file__).resolve().parent / "data" / "climatology.json"
 MAD_TO_SIGMA = 1.4826
 DEFAULT_PRECIP_WET_THRESHOLD_MM = 0.1
+DEFAULT_EMPIRICAL_TAIL_QUANTILE = 99.5
+DEFAULT_EMPIRICAL_LOWER_QUANTILE = 0.5
 DEFAULT_METRIC_EPSILONS: dict[str, float] = {
     "temperature_2m": 0.5,
     "apparent_temperature": 0.5,
@@ -48,8 +50,8 @@ class WetPrecipitation:
     amount_mm: float
     is_wet: bool
     wet_threshold_mm: float
-    wet_amount_percentiles: dict[int, float]
-    wet_amount_percentile: int | None
+    wet_amount_percentiles: dict[float, float]
+    wet_amount_percentile: float | None
     wet_count: int
     total_count: int
     bucket: str
@@ -94,6 +96,20 @@ class Climatology:
             precipitation = {}
         self.wet_threshold_mm = float(
             precipitation.get("wet_threshold_mm", DEFAULT_PRECIP_WET_THRESHOLD_MM)
+        )
+        thresholds = data.get("empirical_thresholds", {})
+        self.empirical_thresholds = thresholds if isinstance(thresholds, Mapping) else {}
+        self.empirical_upper_quantile = float(
+            self.empirical_thresholds.get(
+                "upper_quantile",
+                DEFAULT_EMPIRICAL_TAIL_QUANTILE,
+            )
+        )
+        self.empirical_lower_quantile = float(
+            self.empirical_thresholds.get(
+                "lower_quantile",
+                DEFAULT_EMPIRICAL_LOWER_QUANTILE,
+            )
         )
 
     @classmethod
@@ -154,7 +170,7 @@ class Climatology:
             )
 
         percentiles = {
-            int(percentile): float(value)
+            float(percentile): float(value)
             for percentile, value in stats.get("percentiles", {}).items()
         }
         return WetPrecipitation(
@@ -172,6 +188,27 @@ class Climatology:
                 bucket, int(stats.get("wet_count", 0)), self.min_bucket_n,
             ),
         )
+
+    def empirical_z_threshold(self, metric: str, tail: str) -> float | None:
+        """Return a training-only residual quantile threshold for a metric.
+
+        ``tail`` is ``upper`` for positive anomalies or ``lower`` for negative
+        anomalies. Lower thresholds are stored as signed negative z-values.
+        """
+
+        stats = self._empirical_metric(metric)
+        if stats is None:
+            return None
+        key = "upper_z" if tail == "upper" else "lower_z"
+        value = stats.get(key)
+        return None if value is None else float(value)
+
+    def empirical_wet_amount_threshold(self) -> float | None:
+        stats = self._empirical_metric("precipitation")
+        if stats is None:
+            return None
+        value = stats.get("wet_amount_mm")
+        return None if value is None else float(value)
 
     def _metric_stats(
         self,
@@ -224,6 +261,13 @@ class Climatology:
         if stats is not None:
             return stats, "city"
         return None, "missing"
+
+    def _empirical_metric(self, metric: str) -> Mapping[str, Any] | None:
+        metrics = self.empirical_thresholds.get("metrics", {})
+        if not isinstance(metrics, Mapping):
+            return None
+        stats = metrics.get(metric)
+        return stats if isinstance(stats, Mapping) else None
 
     @staticmethod
     def _missing_z(city: str, metric: str, *, value: float) -> RobustZScore:
@@ -400,7 +444,7 @@ def wet_precipitation_stats(
     all_amounts: Sequence[float],
     *,
     wet_threshold_mm: float = DEFAULT_PRECIP_WET_THRESHOLD_MM,
-    percentiles: Sequence[int] = (50, 75, 90, 95, 99),
+    percentiles: Sequence[float] = (50, 75, 90, 95, 99),
 ) -> dict[str, Any]:
     wet_amounts = [amount for amount in all_amounts if amount >= wet_threshold_mm]
     return {
@@ -450,7 +494,7 @@ def _confidence_for_bucket(bucket: str, n: int, min_bucket_n: int) -> float:
     return 0.0
 
 
-def _percentile_bucket(amount: float, percentiles: Mapping[int, float]) -> int | None:
+def _percentile_bucket(amount: float, percentiles: Mapping[float, float]) -> float | None:
     if not percentiles:
         return None
     for percentile_value in sorted(percentiles):

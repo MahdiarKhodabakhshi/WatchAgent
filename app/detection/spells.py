@@ -11,6 +11,7 @@ from app.detection.native_common import (
 )
 
 SPELL_Z = 3.0
+USE_EMPIRICAL_QUANTILE_GATES = True
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,11 @@ def _detect_spell(
         getattr(ctx.reading, "temperature_2m", None),
         ctx.reading.observation_ts,
     )
-    if z.z is None or sign * z.z < SPELL_Z:
+    if z.z is None:
+        return []
+
+    signed_threshold, threshold_source = _signed_threshold(climatology, sign)
+    if sign * z.z < sign * signed_threshold:
         return []
 
     tail = "warm" if sign > 0 else "cold"
@@ -58,6 +63,10 @@ def _detect_spell(
         "median": None if z.median is None else round(z.median, 3),
         "z_score": round(abs_z, 3),
         "signed_z_score": round(z.z, 3),
+        "threshold_z": round(abs(signed_threshold), 3),
+        "signed_threshold_z": round(signed_threshold, 3),
+        "threshold_source": threshold_source,
+        "threshold_quantile": climatology.empirical_upper_quantile,
         "tail": tail,
         "baseline_bucket": z.bucket,
         "baseline_n": z.n,
@@ -81,3 +90,13 @@ def _detect_spell(
             detector_name=detector_name,
         )
     ]
+
+
+def _signed_threshold(climatology, sign: int) -> tuple[float, str]:
+    if not USE_EMPIRICAL_QUANTILE_GATES:
+        return sign * SPELL_Z, "fixed_z"
+    tail = "upper" if sign > 0 else "lower"
+    threshold = climatology.empirical_z_threshold("temperature_2m", tail)
+    if threshold is None:
+        return sign * SPELL_Z, "fixed_z_fallback"
+    return threshold, f"training_{tail}_quantile"

@@ -142,6 +142,7 @@ KNOWN_EVENT_SPOT_CHECKS = [
 @dataclass(frozen=True)
 class CalibrationProfile:
     name: str
+    use_empirical_quantile_gates: bool
     temperature_shock_z: float
     temperature_shock_delta_c: float
     spell_z: float
@@ -160,24 +161,25 @@ class CalibrationProfile:
     spatial_min_own_z: float
 
 
-INITIAL_PROFILE = CalibrationProfile(
-    name="Initial native thresholds",
-    temperature_shock_z=2.5,
-    temperature_shock_delta_c=4.0,
-    spell_z=2.5,
-    pressure_min_fall_hpa=4.0,
-    pressure_min_wind_rise_kmh=5.0,
-    pressure_min_confirming_gust_kmh=50.0,
+DS1_Z_GATE_PROFILE = CalibrationProfile(
+    name="DS-1 z-gated thresholds",
+    use_empirical_quantile_gates=False,
+    temperature_shock_z=3.0,
+    temperature_shock_delta_c=5.0,
+    spell_z=3.0,
+    pressure_min_fall_hpa=6.0,
+    pressure_min_wind_rise_kmh=8.0,
+    pressure_min_confirming_gust_kmh=60.0,
     heavy_rain_min_mm=10.0,
-    wind_gust_z=2.8,
+    wind_gust_z=3.2,
     wind_gust_anchor_kmh=90.0,
-    heat_humidex=35.0,
+    heat_humidex=38.0,
     strong_heat_humidex=40.0,
     cold_wind_chill=-25.0,
     strong_cold_wind_chill=-35.0,
-    forecast_bust_k=2.0,
-    spatial_z_gap=3.0,
-    spatial_min_own_z=0.0,
+    forecast_bust_k=2.5,
+    spatial_z_gap=5.0,
+    spatial_min_own_z=3.0,
 )
 
 
@@ -538,17 +540,25 @@ def _candidate_strength(candidate: EventCandidate) -> float:
 def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
     patches = {
         temp_module: {
+            "USE_EMPIRICAL_QUANTILE_GATES": profile.use_empirical_quantile_gates,
             "TEMPERATURE_SHOCK_Z": profile.temperature_shock_z,
             "TEMPERATURE_SHOCK_DELTA_C": profile.temperature_shock_delta_c,
         },
-        spells_module: {"SPELL_Z": profile.spell_z},
+        spells_module: {
+            "USE_EMPIRICAL_QUANTILE_GATES": profile.use_empirical_quantile_gates,
+            "SPELL_Z": profile.spell_z,
+        },
         pressure_module: {
             "MIN_PRESSURE_FALL_HPA": profile.pressure_min_fall_hpa,
             "MIN_WIND_RISE_KMH": profile.pressure_min_wind_rise_kmh,
             "MIN_CONFIRMING_GUST_KMH": profile.pressure_min_confirming_gust_kmh,
         },
-        rain_module: {"MIN_HEAVY_RAIN_MM": profile.heavy_rain_min_mm},
+        rain_module: {
+            "USE_EMPIRICAL_QUANTILE_GATES": profile.use_empirical_quantile_gates,
+            "MIN_HEAVY_RAIN_MM": profile.heavy_rain_min_mm,
+        },
         wind_module: {
+            "USE_EMPIRICAL_QUANTILE_GATES": profile.use_empirical_quantile_gates,
             "WIND_GUST_Z": profile.wind_gust_z,
             "ECCC_GUST_KMH": profile.wind_gust_anchor_kmh,
         },
@@ -560,6 +570,7 @@ def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
         },
         forecast_bust_module: {"FORECAST_BUST_K": profile.forecast_bust_k},
         spatial_module: {
+            "USE_EMPIRICAL_QUANTILE_GATES": profile.use_empirical_quantile_gates,
             "SPATIAL_Z_GAP": profile.spatial_z_gap,
             "SPATIAL_MIN_OWN_Z": profile.spatial_min_own_z,
         },
@@ -578,7 +589,8 @@ def _patched_profile(profile: CalibrationProfile) -> Iterator[None]:
 
 def current_profile() -> CalibrationProfile:
     return CalibrationProfile(
-        name="Calibrated thresholds",
+        name="DS-2 empirical quantile gates",
+        use_empirical_quantile_gates=True,
         temperature_shock_z=temp_module.TEMPERATURE_SHOCK_Z,
         temperature_shock_delta_c=temp_module.TEMPERATURE_SHOCK_DELTA_C,
         spell_z=spells_module.SPELL_Z,
@@ -746,27 +758,37 @@ def calibration_changes_table() -> str:
     rows = [
         "| detector | change | rationale |",
         "|---|---|---|",
-        "| temperature_shock | z 2.5 -> 3.0; delta 4C -> 5C | "
-        "Reduce routine swings while preserving diurnal z + rate logic. |",
-        "| warm/cold spell | z 2.5 -> 3.0 | "
-        "Spell incidents should be uncommon persistent tails, not every shoulder. |",
-        "| pressure_plunge | fall 4hPa -> 6hPa; wind rise 5 -> 8 km/h; "
-        "gust confirm 50 -> 60 km/h | Keep only stronger storm corroboration. |",
-        "| heavy_rain_burst | kept 10mm/h | "
-        "Added 6h accumulation scoring so real flash-flood signals reach severe. |",
-        "| wind_gust_burst | z 2.8 -> 3.2; gust anchor 90 unchanged | "
-        "Prefer climatology-rare gusts unless an ECCC-scale gust occurs. |",
-        "| heat_stress | Humidex 35 -> 38 | "
-        "Avoid long seasonal discomfort runs; keep Humidex 40 as anchor. |",
-        "| cold_stress | kept wind chill -25 | "
-        "Per-type replay showed -30 was effectively dead for city-center data. |",
-        "| forecast_bust | normalized error 2.0 -> 2.5 | "
-        "Require clearer surprise over global rolling MAE. |",
-        "| spatial_anomaly | peer z-gap 3.0 -> 5.0; own `|z_hod|` >= 3.0; "
-        "precipitation removed | It was the one detector dominating the mix, "
-        "and geography alone is not an event. |",
+        "| temperature_shock | fixed `abs(z_hod) >= 3.0` -> temperature residual "
+        "99.5/0.5 training quantiles; delta remains 5C | "
+        "The same rare-tail concept is now read from temperature's own "
+        "training residual distribution. |",
+        "| warm/cold spell | fixed `z_hod` +/-3.0 -> temperature residual "
+        "99.5/0.5 training quantiles | "
+        "Warm and cold persistence gates use separate signed tails instead of "
+        "assuming symmetric z behavior. |",
+        "| pressure_plunge | unchanged in DS-2 | It already uses an "
+        "empirical pressure-fall percentile over replay history rather than a "
+        "shared z gate. |",
+        "| heavy_rain_burst | wet-hour p95/floor -> wet-hour 99.5th training "
+        "amount quantile; dry-hour hurdle unchanged | "
+        "Rain uses the upper tail of wet amounts only, not zero-dominated "
+        "precipitation residuals. |",
+        "| wind_gust_burst | fixed gust z 3.2 -> wind-gust residual 99.5th "
+        "training quantile; 90 km/h anchor unchanged | "
+        "Gusts are upper-tail hazards, so the gate is metric-specific and "
+        "one-sided. |",
+        "| heat_stress | unchanged in DS-2 | This detector is formula-threshold based, not a "
+        "`z_hod >= 3` gate. |",
+        "| cold_stress | unchanged in DS-2 | This detector is formula-threshold based, not a "
+        "`z_hod >= 3` gate. |",
+        "| forecast_bust | unchanged in DS-2 | Archive replay still lacks historical forecast "
+        "pairs. |",
+        "| spatial_anomaly | fixed own `|z_hod| >= 3.0` -> metric residual "
+        "training quantiles; peer z-gap remains 5.0 | "
+        "The city must be anomalous in its own metric-specific tail before "
+        "peer comparison; wind-gust spatial checks are upper-tail only. |",
         "| scoring weights | unchanged | "
-        "The replay showed trigger volume, not feed ranking, was the rate issue. |",
+        "DS-2 changes entry gates only; score histograms are deferred to DS-4. |",
     ]
     return "\n".join(rows)
 
@@ -964,6 +986,13 @@ def write_evaluation(
 - Climate non-stationarity still matters: a fixed historical baseline can drift
   as city climate, observing systems, and reanalysis behavior change over time.
   The split makes leakage visible; it does not make the baseline timeless.
+- DS-1's warm/cold spell asymmetry (101 warm vs 71 cold incidents) is a
+  predicted, observed consequence of using a 2015-2021 baseline before recent
+  warming in the 2022-2025 test window.
+- DS-2 gates z-based detectors with empirical per-metric training quantiles
+  from that same committed artifact: 99.5th percentile upper tails, 0.5th
+  percentile lower tails, and wet-hour-only 99.5th percentile rain amount.
+  The quantile level is a fixed rare-tail hypothesis, not tuned to replay rates.
 - Readings replayed: **{data.total_readings}** across **{data.total_city_days}**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,
@@ -1071,13 +1100,13 @@ def main() -> None:
     legacy = replay_legacy(data, forecasts)
     print(f"Legacy raw outputs: {len(legacy)}")
 
-    print("Replaying initial native thresholds...")
-    before = replay_native(data, forecasts, profile=INITIAL_PROFILE)
-    print(f"Initial native incidents: {len(before.incidents)}")
+    print("Replaying DS-1 z-gated thresholds...")
+    before = replay_native(data, forecasts, profile=DS1_Z_GATE_PROFILE)
+    print(f"DS-1 z-gated incidents: {len(before.incidents)}")
 
-    print("Replaying calibrated native thresholds...")
+    print("Replaying DS-2 empirical quantile gates...")
     after = replay_native(data, forecasts, profile=current_profile())
-    print(f"Calibrated native incidents: {len(after.incidents)}")
+    print(f"DS-2 empirical quantile incidents: {len(after.incidents)}")
 
     tp, fp, fn, scenario_details, mttd = evaluate_labeled()
     precision = tp / (tp + fp) if (tp + fp) else 1.0

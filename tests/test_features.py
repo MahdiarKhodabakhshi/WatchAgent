@@ -21,6 +21,9 @@ def test_default_climatology_artifact_loads() -> None:
     assert z.n >= 100
     assert z.scale is not None
     assert z.scale > 0
+    assert climatology.empirical_z_threshold("temperature_2m", "upper") is not None
+    assert climatology.empirical_z_threshold("temperature_2m", "lower") is not None
+    assert climatology.empirical_wet_amount_threshold() is not None
 
 
 def test_z_hod_uses_local_month_hour_and_floors_zero_mad() -> None:
@@ -66,6 +69,16 @@ def test_precipitation_features_use_wet_hour_distribution_only() -> None:
 
     assert wet.is_wet is True
     assert wet.wet_amount_percentile == 95
+
+
+def test_empirical_thresholds_are_read_from_artifact() -> None:
+    climatology = Climatology(_mini_climatology())
+
+    assert climatology.empirical_upper_quantile == 99.5
+    assert climatology.empirical_lower_quantile == 0.5
+    assert climatology.empirical_z_threshold("temperature_2m", "upper") == 3.4
+    assert climatology.empirical_z_threshold("temperature_2m", "lower") == -3.1
+    assert climatology.empirical_wet_amount_threshold() == 9.5
 
 
 def test_k_hour_delta_uses_matching_history_reading() -> None:
@@ -162,6 +175,23 @@ def _mini_climatology() -> dict:
                         "scale": 5.9304,
                     }
                 }
+            },
+        },
+        "empirical_thresholds": {
+            "tail_probability": 0.005,
+            "upper_quantile": 99.5,
+            "lower_quantile": 0.5,
+            "metrics": {
+                "temperature_2m": {
+                    "n": 1000,
+                    "upper_z": 3.4,
+                    "lower_z": -3.1,
+                    "abs_z": 3.5,
+                },
+                "precipitation": {
+                    "wet_count": 100,
+                    "wet_amount_mm": 9.5,
+                },
             },
         },
         "precipitation": {

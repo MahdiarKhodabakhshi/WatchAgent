@@ -14,6 +14,13 @@
 - Climate non-stationarity still matters: a fixed historical baseline can drift
   as city climate, observing systems, and reanalysis behavior change over time.
   The split makes leakage visible; it does not make the baseline timeless.
+- DS-1's warm/cold spell asymmetry (101 warm vs 71 cold incidents) is a
+  predicted, observed consequence of using a 2015-2021 baseline before recent
+  warming in the 2022-2025 test window.
+- DS-2 gates z-based detectors with empirical per-metric training quantiles
+  from that same committed artifact: 99.5th percentile upper tails, 0.5th
+  percentile lower tails, and wet-hour-only 99.5th percentile rain amount.
+  The quantile level is a fixed rare-tail hypothesis, not tuned to replay rates.
 - Readings replayed: **105192** across **4383**
   city-days.
 - Native replay collapses detector candidates with the same stable dedupe keys,
@@ -49,78 +56,78 @@
 
 | detector_type | incidents | raw_firings | per_1k_readings | per_city_day | raw_to_incident_collapse |
 |---|---:|---:|---:|---:|---:|
-| temperature_shock | 21 | 30 | 0.20 | 0.005 | 1.43 |
+| temperature_shock | 30 | 52 | 0.29 | 0.007 | 1.73 |
 | pressure_plunge | 52 | 88 | 0.49 | 0.012 | 1.69 |
-| warm_spell | 101 | 424 | 0.96 | 0.023 | 4.20 |
-| cold_spell | 71 | 442 | 0.67 | 0.016 | 6.23 |
-| heavy_rain_burst | 333 | 1607 | 3.17 | 0.076 | 4.83 |
-| wind_gust_burst | 334 | 1214 | 3.18 | 0.076 | 3.63 |
+| warm_spell | 127 | 638 | 1.21 | 0.029 | 5.02 |
+| cold_spell | 77 | 486 | 0.73 | 0.018 | 6.31 |
+| heavy_rain_burst | 375 | 1688 | 3.56 | 0.086 | 4.50 |
+| wind_gust_burst | 132 | 430 | 1.25 | 0.030 | 3.26 |
 | heat_stress | 53 | 253 | 0.50 | 0.012 | 4.77 |
 | cold_stress | 70 | 516 | 0.67 | 0.016 | 7.37 |
 | forecast_bust | 0 | 0 | 0.00 | 0.000 | 0.00 |
-| spatial_anomaly | 86 | 278 | 0.82 | 0.020 | 3.23 |
-| OVERALL | 1121 | 4852 | 10.66 | 0.256 | 4.33 |
+| spatial_anomaly | 85 | 276 | 0.81 | 0.019 | 3.25 |
+| OVERALL | 1001 | 4427 | 9.52 | 0.228 | 4.42 |
 
 Interpretation:
 
-- Heat/cold stress and warm/cold spell all remain measurable on the test replay: heat_stress 53, cold_stress 70, warm_spell 101, cold_spell 71.
+- Heat/cold stress and warm/cold spell all remain measurable on the test replay: heat_stress 53, cold_stress 70, warm_spell 127, cold_spell 77.
 - Forecast-bust is zero in archive mode because the Open-Meteo archive has observations but not the forecasts issued at those historical times; it remains covered by unit and labeled tests and is active in live DB operation when stored forecasts exist.
 - Spatial anomaly compares each city in `z_hod` space against that city's own climatology first, then compares the standardized value to peers. A city must be anomalous in its own right and far from peer z-values; normal-for-Vancouver mildness beside normal-for-Ottawa cold is not an event.
-- Spatial anomaly is 86/1121 incidents (7.7%), so the structural own-anomaly gate remains visible in the rate mix.
+- Spatial anomaly is 85/1001 incidents (8.5%), so the structural own-anomaly gate remains visible in the rate mix.
 - Spatial incidents use `city|spatial_anomaly|metric` as their dedupe key, with no timestamp component, so multi-hour contrasts collapse into one incident until lifecycle resolves them.
 
 ## Per-City Incident Rates
 
 | city | incidents | per_1k_readings | per_city_day |
 |---|---:|---:|---:|
-| Ottawa | 276 | 7.87 | 0.189 |
-| Toronto | 234 | 6.67 | 0.160 |
-| Vancouver | 611 | 17.43 | 0.418 |
+| Ottawa | 266 | 7.59 | 0.182 |
+| Toronto | 230 | 6.56 | 0.157 |
+| Vancouver | 505 | 14.40 | 0.346 |
 
 ## Severity Breakdown
 
 | detector_type | info | warning | severe |
 |---|---:|---:|---:|
-| temperature_shock | 0 | 21 | 0 |
+| temperature_shock | 0 | 30 | 0 |
 | pressure_plunge | 0 | 41 | 11 |
-| warm_spell | 0 | 82 | 19 |
-| cold_spell | 0 | 55 | 16 |
-| heavy_rain_burst | 0 | 0 | 333 |
-| wind_gust_burst | 0 | 334 | 0 |
+| warm_spell | 0 | 108 | 19 |
+| cold_spell | 0 | 61 | 16 |
+| heavy_rain_burst | 0 | 42 | 333 |
+| wind_gust_burst | 0 | 132 | 0 |
 | heat_stress | 0 | 44 | 9 |
 | cold_stress | 0 | 69 | 1 |
 | forecast_bust | 0 | 0 | 0 |
-| spatial_anomaly | 0 | 86 | 0 |
+| spatial_anomaly | 0 | 85 | 0 |
 
 ## Calibration Before/After
 
 | detector_type | before_incidents | before_per_city_day | after_incidents | after_per_city_day |
 |---|---:|---:|---:|---:|
-| temperature_shock | 119 | 0.027 | 21 | 0.005 |
-| pressure_plunge | 258 | 0.059 | 52 | 0.012 |
-| warm_spell | 191 | 0.044 | 101 | 0.023 |
-| cold_spell | 171 | 0.039 | 71 | 0.016 |
-| heavy_rain_burst | 333 | 0.076 | 333 | 0.076 |
-| wind_gust_burst | 516 | 0.118 | 334 | 0.076 |
-| heat_stress | 112 | 0.026 | 53 | 0.012 |
+| temperature_shock | 21 | 0.005 | 30 | 0.007 |
+| pressure_plunge | 52 | 0.012 | 52 | 0.012 |
+| warm_spell | 101 | 0.023 | 127 | 0.029 |
+| cold_spell | 71 | 0.016 | 77 | 0.018 |
+| heavy_rain_burst | 333 | 0.076 | 375 | 0.086 |
+| wind_gust_burst | 334 | 0.076 | 132 | 0.030 |
+| heat_stress | 53 | 0.012 | 53 | 0.012 |
 | cold_stress | 70 | 0.016 | 70 | 0.016 |
 | forecast_bust | 0 | 0.000 | 0 | 0.000 |
-| spatial_anomaly | 932 | 0.213 | 86 | 0.020 |
+| spatial_anomaly | 86 | 0.020 | 85 | 0.019 |
 
 ## Legacy Volume vs Native Incidents
 
 | old_type | replacement | old_raw_events | new_incidents |
 |---|---|---:|---:|
-| rapid_change | temperature_shock | 11566 | 21 |
-| sustained_extreme | warm_spell + cold_spell | 67513 | 172 |
+| rapid_change | temperature_shock | 11566 | 30 |
+| sustained_extreme | warm_spell + cold_spell | 67513 | 204 |
 | comfort_divergence | heat_stress + cold_stress | 5756 | 123 |
-| cross_city_contrast | spatial_anomaly | 35779 | 86 |
+| cross_city_contrast | spatial_anomaly | 35779 | 85 |
 | forecast_divergence | forecast_bust | 0 | 0 |
 | wmo_transition | supporting evidence only | 167 | 0 |
 | fun_fact | retired from primary feed | 6383 | 0 |
 | *(none)* | pressure_plunge | 0 | 52 |
-| *(none)* | heavy_rain_burst | 0 | 333 |
-| *(none)* | wind_gust_burst | 0 | 334 |
+| *(none)* | heavy_rain_burst | 0 | 375 |
+| *(none)* | wind_gust_burst | 0 | 132 |
 
 ## Known-Event Spot Checks
 
@@ -128,22 +135,22 @@ Interpretation:
 |---|---|---|---:|---|---|
 | Toronto heavy rainfall/flooding | 2024-07-16 | heavy_rain_burst at 2024-07-16 17:00 UTC | 67.0 | severe; 6h accumulation trigger reached 11.0 mm in archive data | [City reported more than 100 mm in pockets across Toronto.](https://www.toronto.ca/news/city-of-toronto-provides-an-update-on-response-efforts-following-heavy-rainfall/) |
 | Vancouver January deep freeze | 2024-01-12 | cold_spell at 2024-01-11 21:00 UTC | 70.0 | severe; Jan 12 candidates reached z=4.2 to z=7.1 | [ECCC noted wind chills reaching Vancouver's waterfront.](https://www.canada.ca/en/environment-climate-change/services/ten-most-impactful-weather-stories/2024.html) |
-| Ottawa severe thunderstorm/outages | 2023-06-26 | heavy_rain_burst at 2023-06-27 02:00 UTC | 66.2 | severe; 6h accumulation trigger reached 10.6 mm in archive data | [Thousands lost power; ECCC warned of downpours, hail, wind.](https://ottawa.citynews.ca/2023/06/26/environment-canada-issues-severe-thunderstorm-warning-for-ottawa/) |
+| Ottawa severe thunderstorm/outages | 2023-06-26 | heavy_rain_burst at 2023-06-27 01:00 UTC | 66.2 | severe; 6h accumulation trigger reached 10.6 mm in archive data | [Thousands lost power; ECCC warned of downpours, hail, wind.](https://ottawa.citynews.ca/2023/06/26/environment-canada-issues-severe-thunderstorm-warning-for-ottawa/) |
 
 ## Calibration Changes Applied
 
 | detector | change | rationale |
 |---|---|---|
-| temperature_shock | z 2.5 -> 3.0; delta 4C -> 5C | Reduce routine swings while preserving diurnal z + rate logic. |
-| warm/cold spell | z 2.5 -> 3.0 | Spell incidents should be uncommon persistent tails, not every shoulder. |
-| pressure_plunge | fall 4hPa -> 6hPa; wind rise 5 -> 8 km/h; gust confirm 50 -> 60 km/h | Keep only stronger storm corroboration. |
-| heavy_rain_burst | kept 10mm/h | Added 6h accumulation scoring so real flash-flood signals reach severe. |
-| wind_gust_burst | z 2.8 -> 3.2; gust anchor 90 unchanged | Prefer climatology-rare gusts unless an ECCC-scale gust occurs. |
-| heat_stress | Humidex 35 -> 38 | Avoid long seasonal discomfort runs; keep Humidex 40 as anchor. |
-| cold_stress | kept wind chill -25 | Per-type replay showed -30 was effectively dead for city-center data. |
-| forecast_bust | normalized error 2.0 -> 2.5 | Require clearer surprise over global rolling MAE. |
-| spatial_anomaly | peer z-gap 3.0 -> 5.0; own `|z_hod|` >= 3.0; precipitation removed | It was the one detector dominating the mix, and geography alone is not an event. |
-| scoring weights | unchanged | The replay showed trigger volume, not feed ranking, was the rate issue. |
+| temperature_shock | fixed `abs(z_hod) >= 3.0` -> temperature residual 99.5/0.5 training quantiles; delta remains 5C | The same rare-tail concept is now read from temperature's own training residual distribution. |
+| warm/cold spell | fixed `z_hod` +/-3.0 -> temperature residual 99.5/0.5 training quantiles | Warm and cold persistence gates use separate signed tails instead of assuming symmetric z behavior. |
+| pressure_plunge | unchanged in DS-2 | It already uses an empirical pressure-fall percentile over replay history rather than a shared z gate. |
+| heavy_rain_burst | wet-hour p95/floor -> wet-hour 99.5th training amount quantile; dry-hour hurdle unchanged | Rain uses the upper tail of wet amounts only, not zero-dominated precipitation residuals. |
+| wind_gust_burst | fixed gust z 3.2 -> wind-gust residual 99.5th training quantile; 90 km/h anchor unchanged | Gusts are upper-tail hazards, so the gate is metric-specific and one-sided. |
+| heat_stress | unchanged in DS-2 | This detector is formula-threshold based, not a `z_hod >= 3` gate. |
+| cold_stress | unchanged in DS-2 | This detector is formula-threshold based, not a `z_hod >= 3` gate. |
+| forecast_bust | unchanged in DS-2 | Archive replay still lacks historical forecast pairs. |
+| spatial_anomaly | fixed own `|z_hod| >= 3.0` -> metric residual training quantiles; peer z-gap remains 5.0 | The city must be anomalous in its own metric-specific tail before peer comparison; wind-gust spatial checks are upper-tail only. |
+| scoring weights | unchanged | DS-2 changes entry gates only; score histograms are deferred to DS-4. |
 
 ## Diagnostic Figures
 

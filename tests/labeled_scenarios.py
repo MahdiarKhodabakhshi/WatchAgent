@@ -105,6 +105,35 @@ def _mini_climatology() -> dict:
             "Vancouver": _city_bucket(15.0),
         },
         "fallbacks": {"month": {}, "city": {}},
+        "empirical_thresholds": {
+            "tail_probability": 0.005,
+            "upper_quantile": 99.5,
+            "lower_quantile": 0.5,
+            "metrics": {
+                "temperature_2m": {
+                    "n": 1000,
+                    "upper_z": 3.0,
+                    "lower_z": -3.0,
+                    "abs_z": 3.0,
+                },
+                "wind_gusts_10m": {
+                    "n": 1000,
+                    "upper_z": 3.2,
+                    "lower_z": -3.2,
+                    "abs_z": 3.2,
+                },
+                "pressure_msl": {
+                    "n": 1000,
+                    "upper_z": 3.0,
+                    "lower_z": -3.0,
+                    "abs_z": 3.0,
+                },
+                "precipitation": {
+                    "wet_count": 100,
+                    "wet_amount_mm": 10.0,
+                },
+            },
+        },
         "precipitation": {
             "wet_threshold_mm": 0.1,
             "buckets": {
@@ -140,7 +169,7 @@ SCENARIOS: list[Scenario] = [
     ),
     Scenario(
         name="heavy_rain_wet_hour_only",
-        description="Wet-hour amount exceeds local wet-hour p95 and absolute floor.",
+        description="Wet-hour amount exceeds the training wet-hour upper quantile.",
         history=_history(),
         reading=_reading(id=101, precipitation=12.0),
         expected_types={"heavy_rain_burst"},
