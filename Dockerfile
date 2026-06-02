@@ -28,4 +28,9 @@ ENV PATH=/home/app/.local/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8000
 
+# Stdlib-only readiness probe (keeps curl out of the image) so `docker compose up --wait`
+# blocks until the app actually serves /health with a 200.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=12 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status == 200 else 1)"]
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
