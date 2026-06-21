@@ -86,7 +86,8 @@ while :; do
     scripts/claude-implementer.sh
     scripts/codex-reviewer.sh "$task_id"
   else
-    printf 'No approved tasks found after planning; skipping implementation and review.\n'
+    printf 'approval needed\n'
+    exit 0
   fi
 
   if [ "$forever" -ne 1 ]; then

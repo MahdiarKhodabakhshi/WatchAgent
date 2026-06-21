@@ -197,6 +197,7 @@ unset ANTHROPIC_AUTH_TOKEN
 
 set +e
 claude --print "$prompt" \
+  --verbose \
   --max-turns 8 \
   --output-format stream-json \
   --permission-mode acceptEdits 2>&1 | tee "$log_path"

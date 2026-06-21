@@ -2,7 +2,8 @@
 
 This repository uses a local, subscription-first workflow:
 
-- Codex plans, writes task specs, and reviews implementation branches.
+- Codex plans, emits structured planner JSON, and reviews implementation branches.
+- The local materializer validates Codex planner JSON and writes task specs.
 - Claude Code implements exactly one approved task at a time.
 - The repository is shared memory through `.agent/`.
 - The human approves work before implementation.
@@ -19,6 +20,7 @@ This repository uses a local, subscription-first workflow:
 - `.agent/reviews/`: Codex review outputs.
 - `.agent/approvals/`: Human approval records.
 - `.agent/logs/`: Local script logs, ignored by git.
+- `.agent/tmp/`: Local planner context and transient output files, ignored by git.
 
 ## Fill In The Project Brief
 
@@ -54,7 +56,9 @@ Create or switch to a non-main branch, then run:
 scripts/codex-planner.sh
 ```
 
-Codex reads the project brief, operating rules, backlog, repo structure, recent history, and available GitHub context. It may write plans and task JSON files under `.agent/`, but it must not implement application code.
+The wrapper reads the project brief, operating rules, backlog, repo structure, recent history, and recent local agent logs, then writes gathered context to `.agent/tmp/planner-context.md`. Codex receives that context and emits JSON only. It must not apply patches or write planning/task files directly.
+
+`scripts/materialize-planner-output.py` validates the Codex JSON against `.agent/schemas/planner-output.schema.json` and `.agent/schemas/task.schema.json`, then writes `.agent/plans/`, `.agent/tasks/`, and `.agent/approvals/pending/` files.
 
 New tasks are `proposed` by default. Tasks listed under `Approved Now` in `.agent/backlog.md` may be emitted as `approved`.
 
@@ -111,6 +115,8 @@ scripts/agent-loop.sh --forever
 ```
 
 Stop with `Ctrl+C`. The loop does not hide failures.
+
+If the planner creates only proposed tasks, the loop exits with `approval needed`. Review the pending approval file, approve a task, and re-run the loop or implementer.
 
 ## Avoid Paid API Usage
 
