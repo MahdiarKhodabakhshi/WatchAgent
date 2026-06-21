@@ -186,6 +186,8 @@ Planning rules:
 - Do not create, modify, print, or request secrets.
 - Keep this workflow subscription-first. Do not request or rely on API-key auth.
 - Proposed new tasks must have status "proposed".
+- Do not re-emit an existing task_id unless you are refreshing an existing unapproved "proposed" task.
+- Never re-emit or mutate approved, in_progress, needs_revision, implemented, blocked, or rejected task ids.
 - Tasks explicitly listed under "Approved Now" in `.agent/backlog.md` may have status "approved".
 - High-risk work must be proposed unless it is explicitly approved by the human, and it must clearly require approval.
 - Create small, reviewable, one-task-per-run task objects.

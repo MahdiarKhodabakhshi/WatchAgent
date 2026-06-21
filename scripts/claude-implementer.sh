@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+usage() {
+  printf 'Usage: scripts/claude-implementer.sh [TASK-ID]\n' >&2
+}
+
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
@@ -11,32 +15,6 @@ fail() {
 
 require_python() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to read and update task JSON files."
-}
-
-find_oldest_approved_task() {
-  python3 - <<'PY'
-import json
-import pathlib
-import sys
-
-tasks = []
-for path in pathlib.Path(".agent/tasks").glob("*.json"):
-    if path.name == "TASK-TEMPLATE.json":
-        continue
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    if data.get("status") == "approved":
-        created_at = data.get("created_at") or ""
-        tasks.append((created_at, path.stat().st_mtime, str(path)))
-
-if not tasks:
-    sys.exit(1)
-
-tasks.sort(key=lambda item: (item[0], item[1], item[2]))
-print(tasks[0][2])
-PY
 }
 
 json_field() {
@@ -54,6 +32,20 @@ if value is None:
     print("")
 else:
     print(value)
+PY
+}
+
+validate_task_id() {
+  local task_id="$1"
+  python3 - "$task_id" <<'PY'
+import re
+import sys
+
+task_id = sys.argv[1]
+if not re.fullmatch(r"TASK-[A-Za-z0-9._-]+", task_id):
+    raise SystemExit(1)
+if task_id == "TASK-TEMPLATE":
+    raise SystemExit(1)
 PY
 }
 
@@ -96,16 +88,19 @@ push_and_open_draft_pr() {
 
   remote_name="$(git remote | sed -n '1p')"
   if [ -z "$remote_name" ]; then
+    append_handoff_update "pr_pending" "No git remote configured; draft PR creation was skipped."
     printf 'No git remote configured; skipping push and draft PR creation.\n'
     return 0
   fi
 
   if ! git push -u "$remote_name" "$branch_name"; then
+    append_handoff_update "pr_pending" "git push failed; draft PR creation was skipped."
     printf 'WARN: git push failed; skipping draft PR creation.\n' >&2
     return 0
   fi
 
   if ! gh auth status >/dev/null 2>&1; then
+    append_handoff_update "pr_pending" "gh is not authenticated; draft PR creation was skipped."
     printf 'gh is installed but not authenticated; skipping draft PR creation.\n'
     return 0
   fi
@@ -126,12 +121,32 @@ push_and_open_draft_pr() {
     fi
   fi
 
-  gh pr create \
+  if ! gh pr create \
     --draft \
     --fill \
     --base "$base_branch" \
-    --head "$branch_name" || printf 'WARN: gh pr create failed.\n' >&2
+    --head "$branch_name"; then
+    append_handoff_update "pr_pending" "gh pr create failed; implementation changes are preserved on the branch."
+    printf 'WARN: gh pr create failed.\n' >&2
+  fi
 }
+
+classify_claude_failure() {
+  if grep -Eiq 'max(imum)?[ -]?turns|turn limit|reached.*turn' "$log_path"; then
+    printf 'max_turns\n'
+  elif grep -Eiq 'auth|oauth|login|not authenticated|not logged in|unauthorized|forbidden' "$log_path"; then
+    printf 'auth_failed\n'
+  elif grep -Eiq 'usage limit|session limit|rate limit|quota|too many requests|exceeded|overloaded' "$log_path"; then
+    printf 'usage_limit\n'
+  else
+    printf 'failed\n'
+  fi
+}
+
+if [ "$#" -gt 1 ]; then
+  usage
+  exit 2
+fi
 
 scripts/agent-env-check.sh
 require_python
@@ -143,15 +158,38 @@ case "$current_branch" in
     ;;
 esac
 
-if ! task_file="$(find_oldest_approved_task)"; then
-  printf 'No approved task found in .agent/tasks/. Nothing to implement.\n'
-  printf 'Approve a proposed task with: scripts/agent-approve.sh TASK-ID\n'
-  exit 0
+task_id="${1-}"
+if [ -z "$task_id" ]; then
+  if ! task_id="$(scripts/agent-task-state.py get-next)"; then
+    printf 'No actionable task found in .agent/tasks/. Nothing to implement.\n'
+    printf 'Approve a proposed task with: scripts/agent-approve.sh TASK-ID\n'
+    exit 0
+  fi
 fi
 
-task_id="$(json_field "$task_file" task_id)"
+validate_task_id "$task_id" || fail "Invalid task id: $task_id"
+
+task_file=".agent/tasks/${task_id}.json"
+[ -f "$task_file" ] || fail "Task file not found: $task_file"
+
+task_status="$(json_field "$task_file" status)"
+case "$task_status" in
+  approved|in_progress|needs_revision)
+    ;;
+  *)
+    fail "Task $task_id has status $task_status; expected approved, in_progress, or needs_revision."
+    ;;
+esac
+
 task_title="$(json_field "$task_file" title)"
-[ -n "$task_id" ] || fail "Selected task file has no task_id: $task_file"
+[ -n "$task_title" ] || task_title="$task_id"
+
+claude_max_turns="${CLAUDE_MAX_TURNS:-16}"
+case "$claude_max_turns" in
+  ''|*[!0-9]*|0)
+    fail "CLAUDE_MAX_TURNS must be a positive integer."
+    ;;
+esac
 
 branch_slug="$(slugify "$task_id")"
 branch_name="agent/${branch_slug}"
@@ -164,6 +202,8 @@ if [ "$current_branch" != "$branch_name" ]; then
   fi
 fi
 
+scripts/agent-task-state.py mark-in-progress "$task_id"
+
 mkdir -p .agent/logs
 timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
 log_path=".agent/logs/claude-implementer-${timestamp}.log"
@@ -171,22 +211,24 @@ log_path=".agent/logs/claude-implementer-${timestamp}.log"
 prompt="$(cat <<PROMPT
 You are Claude Code acting as Implementer / Engineer for this repository.
 
-Implement exactly one approved task:
+Implement exactly one actionable task:
 - Task file: ${task_file}
 - Task ID: ${task_id}
 - Task title: ${task_title}
 
 Rules:
 - Read AGENTS.md, .agent/operating_rules.md, .agent/handoff.md, and the task file before editing.
-- Implement only the approved task. Do not expand scope.
+- Implement only this task. Do not expand scope or start another task.
 - Do not create, modify, print, or request secrets.
 - Do not use paid API-key auth.
 - Do not modify auth, security-sensitive behavior, database migrations, deployment, payment or billing behavior, destructive-command behavior, or external services unless the approved task explicitly says to do so.
+- Use one simple Bash command per tool call. Avoid semicolons, pipes, redirects, &&, and || unless necessary. If a command needs approval, skip it and document it in .agent/handoff.md instead of retrying.
 - Run relevant lint, test, typecheck, or build commands when discoverable.
 - Update README or docs only if behavior or setup changed.
 - Update .agent/handoff.md before stopping with status, changed files, tests run, blockers, and next steps.
-- If implementation is complete, update the task status to "implemented". If blocked, update it to "blocked" and explain why.
-- Do not push, merge, or create PRs. The wrapper script handles commit, push, and draft PR creation.
+- Open or update a draft PR for the task branch when possible. If gh cannot create the PR, document that in .agent/handoff.md and continue.
+- Do not merge pull requests.
+- Do not mark the task implemented, needs_revision, or blocked. The wrapper and Codex reviewer make the final task status decision.
 PROMPT
 )"
 
@@ -198,23 +240,44 @@ unset ANTHROPIC_AUTH_TOKEN
 set +e
 claude --print "$prompt" \
   --verbose \
-  --max-turns 8 \
+  --max-turns "$claude_max_turns" \
   --output-format stream-json \
   --permission-mode acceptEdits 2>&1 | tee "$log_path"
 claude_exit="${PIPESTATUS[0]}"
 set -e
 
 if [ "$claude_exit" -ne 0 ]; then
-  if grep -Eiq 'usage limit|session limit|rate limit|quota|too many requests|exceeded' "$log_path"; then
-    append_handoff_update "blocked" "Claude stopped because a session or usage limit was detected. No retry was attempted."
-    commit_if_changed "WIP: preserve ${task_id} after session limit" || true
-    exit "$claude_exit"
-  fi
-  append_handoff_update "blocked" "Claude exited with status ${claude_exit}. See log for details."
-  exit "$claude_exit"
+  failure_kind="$(classify_claude_failure)"
+  case "$failure_kind" in
+    usage_limit)
+      append_handoff_update "blocked" "Claude stopped because a session or usage limit was detected. No retry was attempted."
+      commit_if_changed "WIP: preserve ${task_id} after usage limit" || true
+      printf 'Claude usage or session limit detected. Checkpoint attempted; see %s\n' "$log_path" >&2
+      exit 20
+      ;;
+    auth_failed)
+      append_handoff_update "blocked" "Claude stopped because authentication failed. Re-authenticate with subscription OAuth before retrying."
+      commit_if_changed "WIP: preserve ${task_id} after auth failure" || true
+      printf 'Claude authentication failure detected. Checkpoint attempted; see %s\n' "$log_path" >&2
+      exit 21
+      ;;
+    max_turns)
+      append_handoff_update "blocked" "Claude stopped after reaching the configured max turns (${claude_max_turns}). Resume the same task after reviewing the handoff."
+      commit_if_changed "WIP: preserve ${task_id} after max turns" || true
+      printf 'Claude reached max turns. Checkpoint attempted; see %s\n' "$log_path" >&2
+      exit 22
+      ;;
+    *)
+      append_handoff_update "blocked" "Claude exited with status ${claude_exit}. See log for details."
+      commit_if_changed "WIP: preserve ${task_id} after Claude failure" || true
+      exit "$claude_exit"
+      ;;
+  esac
 fi
 
+append_handoff_update "implemented_by_claude" "Claude completed its implementation pass. Final task status is reserved for Codex review and the loop."
 commit_if_changed "Implement ${task_id}: ${task_title}" || true
 push_and_open_draft_pr "$branch_name"
+commit_if_changed "Record PR status for ${task_id}" || true
 
 printf 'Claude implementer finished for %s. Log: %s\n' "$task_id" "$log_path"

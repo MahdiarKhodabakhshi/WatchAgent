@@ -52,8 +52,17 @@ This repository uses a local, subscription-first two-agent workflow. The repo is
 ### One-Task-Per-Run Rule
 
 - Claude implements one approved task per run.
+- The autonomous loop implements at most one actionable task per implementation cycle.
 - If another issue is discovered, record it as a proposed task instead of expanding the current implementation.
 - Session recovery must resume the same task or stop with a clear handoff.
+
+### Loop Rules
+
+- Proposed tasks require human approval before implementation.
+- Tasks with status `needs_revision` may be fixed without reapproval only when the fix stays within the original approved task scope.
+- A task marked `implemented` still requires human PR review and merge.
+- Agents must not auto-merge PRs.
+- Codex review verdicts drive final loop state: `accepted`, `needs_revision`, or `blocked`.
 
 ### Subscription-Only Rule
 

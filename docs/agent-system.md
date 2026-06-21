@@ -1,44 +1,34 @@
 # Local Two-Agent Development System
 
-This repository uses a local, subscription-first workflow:
+This repository uses a local, subscription-first autonomous loop:
 
-- Codex plans, emits structured planner JSON, and reviews implementation branches.
-- The local materializer validates Codex planner JSON and writes task specs.
-- Claude Code implements exactly one approved task at a time.
-- The repository is shared memory through `.agent/`.
-- The human approves work before implementation.
-- Agents never push to `main` or `master` and never merge pull requests.
+1. The wrapper gathers repository context.
+2. Codex emits planner JSON only.
+3. The wrapper validates and materializes plans, tasks, and approvals.
+4. If no actionable approved task exists, the wrapper notifies the human and stops, unless `--forever` is active.
+5. Claude Code implements exactly one actionable task.
+6. Claude or the wrapper opens or updates a draft PR when possible.
+7. Codex reviews the branch and writes structured review artifacts.
+8. The loop updates task state from the review verdict.
+9. In `--forever` mode, the loop sleeps and repeats.
+
+Agents never push directly to `main` or `master`, never merge PRs, and never use API-key backed automation for this workflow.
 
 ## Shared Files
 
 - `.agent/project_brief.md`: Human-owned product context.
 - `.agent/operating_rules.md`: Contract both agents must follow.
 - `.agent/backlog.md`: Proposed and approved work queues.
-- `.agent/tasks/`: JSON task specs.
-- `.agent/plans/`: Codex planning notes.
+- `.agent/tasks/`: JSON task specs and loop-managed task state.
+- `.agent/plans/`: Codex planner result notes.
 - `.agent/handoff.md`: Resumable current-state handoff.
-- `.agent/reviews/`: Codex review outputs.
+- `.agent/reviews/`: Markdown and JSON Codex review outputs.
 - `.agent/approvals/`: Human approval records.
+- `.agent/notifications/`: Local notification markdown files, ignored by git.
 - `.agent/logs/`: Local script logs, ignored by git.
-- `.agent/tmp/`: Local planner context and transient output files, ignored by git.
+- `.agent/tmp/`: Local planner/reviewer prompts and transient output, ignored by git.
 
-## Fill In The Project Brief
-
-Before planning product work, edit `.agent/project_brief.md` and fill in:
-
-- Project name and one-sentence goal.
-- Target users.
-- Current MVP features.
-- Planned features.
-- Competitors or alternatives.
-- Design and product principles.
-- Non-goals.
-- Risky areas.
-- Approval policy.
-
-Keep risky areas explicit. Security, auth, migrations, deployment, billing, destructive commands, and external services need human approval before implementation.
-
-## Check The Environment
+## Environment Check
 
 Run:
 
@@ -46,101 +36,166 @@ Run:
 scripts/agent-env-check.sh
 ```
 
-The check verifies required CLIs, confirms the repo is a git repo, prints the current branch, warns on dirty worktrees, and fails closed if known API-key auth variables are present. Use ChatGPT login for Codex and subscription OAuth for Claude Code.
+The check verifies required CLIs, confirms the repo is a git repo, prints the current branch, warns on dirty worktrees, and fails closed if known Codex/OpenAI or Claude/Anthropic API-key variables are set. Use ChatGPT login for Codex and subscription OAuth for Claude Code.
 
-## Run The Planner
+## One-Cycle Mode
 
-Create or switch to a non-main branch, then run:
-
-```bash
-scripts/codex-planner.sh
-```
-
-The wrapper reads the project brief, operating rules, backlog, repo structure, recent history, and recent local agent logs, then writes gathered context to `.agent/tmp/planner-context.md`. Codex receives that context and emits JSON only. It must not apply patches or write planning/task files directly.
-
-`scripts/materialize-planner-output.py` validates the Codex JSON against `.agent/schemas/planner-output.schema.json` and `.agent/schemas/task.schema.json`, then writes `.agent/plans/`, `.agent/tasks/`, and `.agent/approvals/pending/` files.
-
-New tasks are `proposed` by default. Tasks listed under `Approved Now` in `.agent/backlog.md` may be emitted as `approved`.
-
-## Approve A Task
-
-Review the proposed task JSON in `.agent/tasks/`, then approve one task:
-
-```bash
-scripts/agent-approve.sh TASK-ID
-```
-
-High-risk tasks require an explicit flag:
-
-```bash
-scripts/agent-approve.sh --allow-high-risk TASK-ID
-```
-
-Approval changes the task status to `approved`, sets `approved_by` to `human`, and writes an approval record.
-
-## Run The Implementer
-
-From a non-main branch, run:
-
-```bash
-scripts/claude-implementer.sh
-```
-
-The script finds the oldest approved task, creates or switches to `agent/<task-id-slug>`, asks Claude Code to implement exactly that task, asks it to update `.agent/handoff.md`, commits changes if possible, pushes if a remote exists, and creates a draft PR when `gh` is authenticated.
-
-The script does not merge.
-
-## Run The Reviewer
-
-After implementation, run:
-
-```bash
-scripts/codex-reviewer.sh TASK-ID
-```
-
-Codex reviews in read-only mode and the wrapper writes the review to `.agent/reviews/`. The review checks scope, tests, docs, security, architecture, and acceptance criteria.
-
-## Optional One-Cycle Loop
-
-Run one conservative cycle:
+From a non-main branch:
 
 ```bash
 scripts/agent-loop.sh
 ```
 
-The default is one cycle only. To keep cycling locally:
+The default runs one complete cycle: plan, select one actionable task, implement, open or update a draft PR, review, update task state, checkpoint, then stop. It refuses to run on `main` or `master`.
+
+## Forever Mode
+
+Run:
 
 ```bash
 scripts/agent-loop.sh --forever
 ```
 
-Stop with `Ctrl+C`. The loop does not hide failures.
+Useful options:
 
-If the planner creates only proposed tasks, the loop exits with `approval needed`. Review the pending approval file, approve a task, and re-run the loop or implementer.
+```bash
+scripts/agent-loop.sh --forever --sleep-seconds 1800
+scripts/agent-loop.sh --forever --max-iterations 3
+```
+
+The loop sleeps between cycles and stops after more than 3 consecutive planner/reviewer/checkpoint failures. `Ctrl+C` stops safely. Claude auth, usage, or max-turn stops terminate immediately after checkpointing.
+
+## Approval Gate
+
+Planner output creates proposed tasks and pending approval files. Review `.agent/approvals/pending/`, then approve exactly one task:
+
+```bash
+scripts/agent-approve.sh TASK-ID
+```
+
+High-risk tasks require explicit approval:
+
+```bash
+scripts/agent-approve.sh --allow-high-risk TASK-ID
+```
+
+If no actionable task exists, the loop writes a notification and prints:
+
+```text
+No approved tasks. Review .agent/approvals/pending/ and approve one with scripts/agent-approve.sh TASK-ID.
+```
+
+## Task Status Lifecycle
+
+Allowed task statuses:
+
+- `proposed`: Planned but not approved.
+- `approved`: Human approved and eligible for implementation.
+- `in_progress`: Selected by the implementer.
+- `needs_revision`: Codex review found required fixes inside the original approved scope.
+- `implemented`: Codex review accepted the implementation; human PR review and merge are still required.
+- `blocked`: Human decision or external access is needed.
+- `rejected`: Human rejected the proposed task.
+
+Implementation priority is deterministic: `needs_revision`, then `in_progress`, then `approved`. `proposed`, `rejected`, `implemented`, and `blocked` are ignored for implementation.
+
+Use the state helper for manual inspection or repair:
+
+```bash
+scripts/agent-task-state.py list-actionable
+scripts/agent-task-state.py get-next
+scripts/agent-task-state.py mark-blocked TASK-ID --reason "human decision needed"
+```
+
+## Planner Behavior
+
+Run the planner directly when needed:
+
+```bash
+scripts/codex-planner.sh
+```
+
+The wrapper gathers context into `.agent/tmp/planner-context.md`, asks Codex for JSON only, validates the output, and materializes files through `scripts/materialize-planner-output.py`. Existing approved or human-touched task files are not overwritten. Existing unapproved `proposed` tasks may be refreshed safely.
+
+## Implementer Behavior
+
+Run the implementer directly for the next actionable task:
+
+```bash
+scripts/claude-implementer.sh
+```
+
+Or pass an explicit task id:
+
+```bash
+scripts/claude-implementer.sh TASK-ID
+```
+
+The script marks the task `in_progress`, switches to `agent/<task-id-slug>`, runs Claude Code with subscription auth, asks Claude to update `.agent/handoff.md`, commits implementation changes when possible, pushes the task branch, and opens or updates a draft PR when `gh` can do so.
+
+Claude must not mark the task implemented. The review verdict controls final status.
+
+## Review Behavior
+
+Run the reviewer after implementation:
+
+```bash
+scripts/codex-reviewer.sh TASK-ID
+```
+
+The reviewer runs Codex in read-only mode and writes:
+
+- `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.json`
+- `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.md`
+
+The JSON verdict is one of:
+
+- `accepted`: loop marks the task `implemented`, writes a completion note, and notifies the human that the PR is ready.
+- `needs_revision`: loop marks the same task `needs_revision`; the next cycle sends it back to Claude without new approval if fixes stay in scope.
+- `blocked`: loop marks the task `blocked` and notifies the human.
+
+Accepted does not mean merged. Humans still review and merge PRs.
+
+## Notifications
+
+Run manually when needed:
+
+```bash
+scripts/agent-notify.sh approval_needed
+scripts/agent-notify.sh review_ready TASK-ID
+```
+
+Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready`, `auth_failed`, `usage_limit`, and `loop_failed`. Each notification includes the reason, timestamp, branch, current actionable task, pending approvals, and the next command for the human.
+
+GitHub issue creation is best-effort. If `gh` is authenticated and a remote exists, approval and review notifications can create or comment on issues labeled `agent/approval-needed` or `agent/review-needed`. GitHub is not required for success.
+
+## PR Behavior
+
+Implementation branches are named `agent/<task-id-slug>`. PRs created by agents are draft PRs unless a human says otherwise. Agents never merge PRs and never push directly to `main` or `master`.
+
+If `gh` cannot create a PR, the implementer records that in `.agent/handoff.md` and continues after preserving local changes.
+
+## Recovery
+
+For Claude auth errors:
+
+1. Inspect `.agent/handoff.md` and the latest `.agent/logs/claude-implementer-*.log`.
+2. Re-authenticate Claude Code with subscription OAuth.
+3. Confirm API-key environment variables are unset.
+4. Re-run `scripts/agent-loop.sh` or `scripts/claude-implementer.sh TASK-ID`.
+
+For usage or max-turn stops:
+
+1. Inspect `.agent/handoff.md`.
+2. Wait for usage to reset, or increase `CLAUDE_MAX_TURNS` for a scoped retry.
+3. Resume the same task with `scripts/agent-loop.sh`.
+
+For planner, reviewer, or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause.
 
 ## Avoid Paid API Usage
 
-- Use subscription login for Codex and Claude Code.
-- Do not add API keys to files.
-- Do not create or modify secrets.
-- Do not bypass `scripts/agent-env-check.sh`.
-- Do not change the scripts to allow key-backed execution.
-
-## Recover After Session Limits
-
-If Claude Code hits a session or usage limit, the implementer script stops without retry spam. It preserves local changes, commits a WIP checkpoint when possible, and appends to `.agent/handoff.md`.
-
-To resume:
-
-1. Inspect `.agent/handoff.md`.
-2. Confirm you are on the same `agent/<task-id-slug>` branch.
-3. Re-run `scripts/claude-implementer.sh` after access is available again.
-
-## Never Allow
-
-- Direct pushes to `main` or `master`.
-- Agent-merged PRs.
-- Unapproved implementation work.
-- Secrets in files, logs, commits, task specs, or prompts.
-- Unapproved security, auth, database migration, deployment, payment, billing, destructive-command, or external-service changes.
-- Sandbox or permission bypasses.
+- Use local Codex CLI with ChatGPT login.
+- Use Claude Code with subscription OAuth.
+- Do not set `OPENAI_API_KEY`, `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN`.
+- Do not add secrets or API keys to files, prompts, logs, tasks, or commits.
+- Do not change scripts to allow paid key-backed automation.

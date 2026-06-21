@@ -115,6 +115,16 @@
       "items": {
         "type": "string"
       }
+    },
+    "status_updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status_reason": {
+      "type": "string"
+    },
+    "last_review_file": {
+      "type": "string"
     }
   }
 }

@@ -403,6 +403,30 @@ def approval_markdown(task: dict[str, Any], task_path: Path, generated_at: str) 
     return "\n".join(lines)
 
 
+def load_existing_task(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValidationFailure(
+            [f"Existing task is invalid JSON: {relative(path)} line {exc.lineno}, column {exc.colno}"]
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValidationFailure([f"Existing task is not a JSON object: {relative(path)}"])
+    return data
+
+
+def can_refresh_existing_task(existing: dict[str, Any], new_task: dict[str, Any]) -> bool:
+    return (
+        existing.get("status") == "proposed"
+        and existing.get("approved_by") is None
+        and new_task.get("status") == "proposed"
+    )
+
+
+def write_task_json(path: Path, task: dict[str, Any]) -> None:
+    path.write_text(json.dumps(task, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
 def check_write_targets(plan_path: Path, tasks: list[dict[str, Any]]) -> None:
     errors: list[str] = []
     if plan_path.exists():
@@ -410,18 +434,18 @@ def check_write_targets(plan_path: Path, tasks: list[dict[str, Any]]) -> None:
 
     for task in tasks:
         task_path = agent_path("tasks", f"{task['task_id']}.json")
-        if task_path.exists():
-            errors.append(f"Refusing to overwrite existing task: {relative(task_path)}")
+        if task_path.is_symlink():
+            errors.append(f"Refusing to write symlinked task path: {relative(task_path)}")
         if task["status"] == "proposed":
             approval_path = agent_path("approvals", "pending", f"{task['task_id']}.md")
-            if approval_path.exists():
-                errors.append(f"Refusing to overwrite existing pending approval: {relative(approval_path)}")
+            if approval_path.is_symlink():
+                errors.append(f"Refusing to write symlinked pending approval path: {relative(approval_path)}")
 
     if errors:
         raise ValidationFailure(errors)
 
 
-def materialize(data: dict[str, Any], tasks: list[dict[str, Any]]) -> list[Path]:
+def materialize(data: dict[str, Any], tasks: list[dict[str, Any]]) -> tuple[list[Path], list[Path], list[str]]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     plan_path = agent_path("plans", f"PLAN-{timestamp}.md")
@@ -436,20 +460,36 @@ def materialize(data: dict[str, Any], tasks: list[dict[str, Any]]) -> list[Path]
         directory.mkdir(parents=True, exist_ok=True)
 
     created: list[Path] = []
+    updated: list[Path] = []
+    skipped: list[str] = []
     plan_path.write_text(plan_markdown(data, tasks, generated_at), encoding="utf-8")
     created.append(plan_path)
 
     for task in tasks:
         task_path = agent_path("tasks", f"{task['task_id']}.json")
-        task_path.write_text(json.dumps(task, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
-        created.append(task_path)
+        task_exists = task_path.exists()
+        if task_exists:
+            existing = load_existing_task(task_path)
+            if not can_refresh_existing_task(existing, task):
+                existing_status = existing.get("status", "unknown")
+                skipped.append(f"{relative(task_path)} already exists with status {existing_status!r}; not overwritten.")
+                continue
+            write_task_json(task_path, task)
+            updated.append(task_path)
+        else:
+            write_task_json(task_path, task)
+            created.append(task_path)
 
         if task["status"] == "proposed":
             approval_path = agent_path("approvals", "pending", f"{task['task_id']}.md")
+            approval_exists = approval_path.exists()
             approval_path.write_text(approval_markdown(task, task_path, generated_at), encoding="utf-8")
-            created.append(approval_path)
+            if approval_exists:
+                updated.append(approval_path)
+            else:
+                created.append(approval_path)
 
-    return created
+    return created, updated, skipped
 
 
 def main(argv: list[str]) -> int:
@@ -458,7 +498,7 @@ def main(argv: list[str]) -> int:
         data = load_json_document(raw)
         task_schema = load_task_schema()
         tasks = validate_planner_output(data, task_schema)
-        created = materialize(data, tasks)
+        created, updated, skipped = materialize(data, tasks)
     except OSError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -471,9 +511,14 @@ def main(argv: list[str]) -> int:
     print("Planner output materialized.")
     for path in created:
         print(f"Created {relative(path)}")
+    for path in updated:
+        print(f"Updated {relative(path)}")
+    for item in skipped:
+        print(f"Skipped {item}")
     print(
         "Summary: "
-        f"1 plan, {len(tasks)} task file(s), "
+        f"1 plan, {len(tasks)} task object(s), "
+        f"{len(created)} created file(s), {len(updated)} updated file(s), {len(skipped)} skipped task(s), "
         f"{sum(1 for task in tasks if task['status'] == 'proposed')} pending approval file(s)."
     )
     return 0
