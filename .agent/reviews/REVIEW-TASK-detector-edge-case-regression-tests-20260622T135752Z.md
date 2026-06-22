@@ -1,0 +1,34 @@
+# Codex Review: TASK-detector-edge-case-regression-tests
+
+- Generated at: 2026-06-22T13:58:50Z
+- Verdict: needs_revision
+- JSON artifact: .agent/reviews/REVIEW-TASK-detector-edge-case-regression-tests-20260622T135752Z.json
+
+## Summary
+
+The detector regression tests themselves appear aligned with the approved task, but the reviewed fd8c8cb3af011d29934f4ed267331368deafb277..HEAD diff contains extensive unrelated agent workflow, Telegram, systemd deployment, approval/task metadata, and script changes. That violates the task scope and forbidden-change constraints for this detector-test-only task.
+
+## Scope Check
+
+Failed: expected scope was limited to focused detector tests and handoff updates. The diff also adds/modifies many unrelated workflow and deployment files, including deploy/systemd/*, scripts/agent-telegram-bot.py, scripts/idea-worker.py, scripts/agent-autoapprove.sh, scripts/telegram-send.sh, docs/agent-system.md, .agent/telegram.env.example, .gitignore, unrelated task approval/status files, and unrelated review artifacts. These are not part of the approved detector regression task.
+
+## Tests Check
+
+The added tests in tests/test_native_detectors.py cover deterministic, network-free detector edge cases and use existing helper patterns. However pytest/ruff were not run due to the reported approval gate, so execution remains unverified. The unrelated new workflow code also adds tests, but those are out of scope for this task and should not be reviewed as part of it.
+
+## Docs Check
+
+Failed for scope: .agent/handoff.md documents the detector-test work and verification blocker, which is appropriate, but docs/agent-system.md and deploy/systemd/README.md introduce unrelated workflow, Telegram, and always-on operation documentation outside this task.
+
+## Security Check
+
+Failed for scope/security: the diff introduces Telegram integration, notification scripts, systemd service files, auto-approval behavior, and long-running agent supervision. Those are notification/deployment/workflow changes and new external-service integration, explicitly forbidden for this detector-test-only task unless separately approved and isolated.
+
+## Required Fixes
+
+- Narrow the reviewed task diff to only the approved detector regression scope: tests/test_native_detectors.py and the relevant .agent/handoff.md updates. Remove or split out the unrelated agent workflow, Telegram, systemd deployment, approval/task metadata, docs, and script changes from fd8c8cb3af011d29934f4ed267331368deafb277..HEAD before re-review.
+- After narrowing the diff, run or have an operator run the relevant verification command, at minimum pytest tests/test_native_detectors.py -q, and record the result or blocker in .agent/handoff.md.
+
+## Recommended Followups
+
+- Review the Telegram/systemd/agent workflow changes under separate human-approved tasks with security and deployment scrutiny.

@@ -38,7 +38,7 @@
   "objective": "Add focused regression tests for existing detector edge cases while preserving current thresholds, scoring, lifecycle behavior, and evaluation claims.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "in_progress",
+  "status": "needs_revision",
   "task_id": "TASK-detector-edge-case-regression-tests",
   "test_plan": [
     "Run the touched detector test file directly, such as `pytest tests/test_native_detectors.py` or the specific file modified.",
@@ -46,6 +46,7 @@
     "Record commands and results in `.agent/handoff.md`."
   ],
   "title": "Add detector edge-case regression tests without threshold changes",
-  "status_updated_at": "2026-06-22T05:38:35Z",
-  "status_reason": "Selected for implementation by the agent loop."
+  "status_updated_at": "2026-06-22T13:58:50Z",
+  "status_reason": "Codex review requires revision. Review file: .agent/reviews/REVIEW-TASK-detector-edge-case-regression-tests-20260622T135752Z.json",
+  "last_review_file": ".agent/reviews/REVIEW-TASK-detector-edge-case-regression-tests-20260622T135752Z.json"
 }
