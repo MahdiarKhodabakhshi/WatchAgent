@@ -123,6 +123,51 @@ def test_pressure_plunge_cold_start_does_not_fire() -> None:
     assert detector.detect(_ctx(current, history)) == []
 
 
+def test_pressure_plunge_falls_back_to_surface_pressure_when_msl_missing() -> None:
+    # Edge case: ``pressure_msl`` is the preferred metric, but when it is absent the
+    # detector must fall back to ``surface_pressure`` (see ``_pressure_metric``) and
+    # otherwise behave identically. Mirrors the ``pressure_msl`` happy path.
+    detector = PressurePlungeDetector()
+    current = _reading(
+        id=100,
+        pressure_msl=None,
+        surface_pressure=1000.0,
+        wind_gusts_10m=45.0,
+    )
+    history = _history(
+        {
+            -3: {"surface_pressure": 1007.0, "wind_gusts_10m": 35.0},
+            -6: {"surface_pressure": 1010.0, "wind_gusts_10m": 30.0},
+        },
+        pressure_msl=None,
+        surface_pressure=1010.0,
+        wind_gusts_10m=30.0,
+    )
+
+    events = detector.detect(_ctx(current, history))
+
+    assert len(events) == 1
+    assert events[0].event_type == "pressure_plunge"
+    assert events[0].metric == "surface_pressure"
+    assert events[0].signal_values["pressure_fall_hpa"] == 7.0
+    assert events[0].signal_values["wind_rise_kmh"] == 10.0
+
+
+def test_pressure_plunge_does_not_fire_without_any_pressure_metric() -> None:
+    # Edge case: with neither ``pressure_msl`` nor ``surface_pressure`` present the
+    # detector has no metric to evaluate and stays silent.
+    detector = PressurePlungeDetector()
+    current = _reading(
+        id=100,
+        pressure_msl=None,
+        surface_pressure=None,
+        wind_gusts_10m=60.0,
+    )
+    history = _history(pressure_msl=None, surface_pressure=None)
+
+    assert detector.detect(_ctx(current, history)) == []
+
+
 def test_heavy_rain_burst_fires_on_wet_hour_amount() -> None:
     detector = HeavyRainBurstDetector()
     current = _reading(id=100, precipitation=12.0)
@@ -238,6 +283,15 @@ def test_heat_stress_cold_start_does_not_fire() -> None:
     assert detector.detect(_ctx(current, _history(count=11))) == []
 
 
+def test_heat_stress_missing_dew_point_does_not_fire() -> None:
+    # Edge case: humidex needs both air temperature and dew point. A hot reading with
+    # a missing optional dew-point field must not fire (no humidex can be computed).
+    detector = HeatStressDetector()
+    current = _reading(id=100, temperature_2m=35.0, dew_point_2m=None)
+
+    assert detector.detect(_ctx(current, _history())) == []
+
+
 def test_cold_stress_fires_on_wind_chill() -> None:
     detector = ColdStressDetector()
     current = _reading(id=100, temperature_2m=-20.0, wind_speed_10m=30.0)
@@ -262,6 +316,25 @@ def test_cold_stress_cold_start_does_not_fire() -> None:
     current = _reading(id=100, temperature_2m=-30.0, wind_speed_10m=40.0)
 
     assert detector.detect(_ctx(current, _history(count=11))) == []
+
+
+def test_cold_stress_missing_wind_speed_does_not_fire() -> None:
+    # Edge case: wind chill needs wind speed. An extreme-cold reading with a missing
+    # optional wind-speed field must not fire.
+    detector = ColdStressDetector()
+    current = _reading(id=100, temperature_2m=-20.0, wind_speed_10m=None)
+
+    assert detector.detect(_ctx(current, _history())) == []
+
+
+def test_cold_stress_calm_wind_below_chill_floor_does_not_fire() -> None:
+    # Edge case: the wind-chill formula is undefined for calm wind (<= 4.8 km/h), so
+    # even an extreme air temperature with near-zero wind yields no wind chill and the
+    # detector stays silent regardless of how cold it is.
+    detector = ColdStressDetector()
+    current = _reading(id=100, temperature_2m=-30.0, wind_speed_10m=4.0)
+
+    assert detector.detect(_ctx(current, _history())) == []
 
 
 def test_forecast_bust_fires_on_error_over_rolling_mae() -> None:

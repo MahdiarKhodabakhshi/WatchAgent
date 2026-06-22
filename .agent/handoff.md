@@ -2,15 +2,49 @@
 
 ## Current Task
 
-TASK-docs-setup-verification-audit — Audit local setup and verification documentation (docs-only).
+TASK-detector-edge-case-regression-tests — Add detector edge-case regression tests without threshold changes (backend-tests, low risk).
 
 ## Current Branch
 
-agent/task-docs-setup-verification-audit
+agent_developed (single_work_branch mode; task start commit fd8c8cb)
 
 ## Status
 
-Docs content for this task is complete and was accepted by the latest review. The remaining required fix is a **branch-structure / repo-management issue that cannot be resolved by a docs-only edit** — see "Revision Pass 20260622 (second — branch scope)" immediately below. (Final task status is set by the wrapper/reviewer, not by Claude.)
+Implementation pass complete. Added five focused, deterministic, network-free regression tests to `tests/test_native_detectors.py` that document existing detector edge-case behavior. No detector code, thresholds, scoring weights, severity mapping, lifecycle behavior, climatology artifacts, evaluation metrics, or README claims were changed. (Final task status is set by the wrapper/reviewer, not by Claude.)
+
+### What this task added (20260622)
+
+New tests, all using the existing `_reading`/`_history`/`_ctx` helpers and the `_mini_climatology()` fixture in `tests/test_native_detectors.py`:
+
+- `test_pressure_plunge_falls_back_to_surface_pressure_when_msl_missing` — when `pressure_msl` is absent, `PressurePlungeDetector` uses `surface_pressure` (`_pressure_metric` fallback) and otherwise behaves like the `pressure_msl` happy path (`metric == "surface_pressure"`, `pressure_fall_hpa == 7.0`, `wind_rise_kmh == 10.0`).
+- `test_pressure_plunge_does_not_fire_without_any_pressure_metric` — with neither `pressure_msl` nor `surface_pressure` present, the detector stays silent.
+- `test_heat_stress_missing_dew_point_does_not_fire` — humidex needs air temp + dew point; a hot reading with a missing dew point does not fire.
+- `test_cold_stress_missing_wind_speed_does_not_fire` — wind chill needs wind speed; an extreme-cold reading with missing wind speed does not fire.
+- `test_cold_stress_calm_wind_below_chill_floor_does_not_fire` — the wind-chill formula is undefined for calm wind (<= `MIN_WIND_CHILL_KMH` = 4.8 km/h), so even -30C with 4.0 km/h wind produces no event.
+
+These document current behavior only (missing-optional-field handling and a borderline non-trigger); they assert the detectors' existing return contracts and do not change any thresholds. No unexpected detector behavior was found, so no follow-up task is proposed.
+
+### Changed Files (this task)
+
+- `tests/test_native_detectors.py` — added five regression tests (no other test removed or weakened).
+- `.agent/handoff.md` — this update.
+
+### Tests Run (this task)
+
+- `python -m pytest tests/test_native_detectors.py -q` — NOT RUN. Blocked: shell commands require interactive approval in this sandbox (same gate documented for the prior task); per the operating rules I did not bypass the gate or retry beyond confirming the block.
+- `.venv/bin/pytest tests/test_native_detectors.py -q` and `python -m pytest tests/test_native_detectors.py -q -k "pressure_plunge or stress"` — NOT RUN, same reason.
+- Verification by inspection: each new test was traced against the detector source (`app/detection/pressure_plunge.py` `_pressure_metric`/`k_hour_delta`/`_historical_deltas`, `app/detection/stress.py` `wind_chill`/`humidex` and the `numeric_attr is None` guards) and mirrors the existing happy-path/near-miss tests' helper usage and assertions. The `surface_pressure` fallback test mirrors `test_pressure_plunge_fires_on_three_hour_fall_confirmed_by_wind` exactly except for the metric, so it shares that test's expected deltas (7.0 hPa fall, 10.0 km/h wind rise). A reviewer with shell access should run `pytest tests/test_native_detectors.py -q` to confirm green.
+
+### Blockers (this task)
+
+- Bash execution (pytest/ruff) requires interactive approval in this environment and was therefore not run. Read/Edit/grep tools worked normally. Residual risk: the new tests were validated by code reading, not execution; a reviewer should run the detector test file to confirm.
+
+### Next Steps (this task)
+
+- Reviewer/operator: run `pytest tests/test_native_detectors.py -q` (and optionally `ruff check tests`) to confirm the additions pass.
+- Human PR review and merge/cherry-pick from `agent_developed` (agents must not merge).
+
+### Prior task content (TASK-docs-setup-verification-audit) — retained for history below
 
 ### Revision Pass 20260622 (second — branch scope)
 
@@ -173,3 +207,13 @@ Other:
 - Status: implemented_by_claude
 - Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
 - Log: .agent/logs/claude-implementer-20260622T035919Z.log
+
+## Script Update 20260622T062446Z
+
+- Current task: TASK-detector-edge-case-regression-tests
+- Current branch: agent_developed
+- Configured work branch: agent_developed
+- Branch mode: single_work_branch
+- Status: blocked
+- Note: Claude stopped after reaching the configured max turns (16). Resume the same task after reviewing the handoff.
+- Log: .agent/logs/claude-implementer-20260622T062446Z.log
