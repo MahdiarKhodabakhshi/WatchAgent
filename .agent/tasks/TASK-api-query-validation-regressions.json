@@ -37,12 +37,14 @@
   "objective": "Strengthen confidence in existing `/readings` and `/events` query validation behavior with focused tests that document current API contracts without changing behavior.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "approved",
+  "status": "in_progress",
   "task_id": "TASK-api-query-validation-regressions",
   "test_plan": [
     "Run `pytest tests/test_api.py`.",
     "If broader impact is plausible, run the backend test subset related to storage and schemas, such as `pytest tests/test_api.py tests/test_dedup.py tests/test_forecast_storage.py`.",
     "Record commands, results, and any failures in `.agent/handoff.md`."
   ],
-  "title": "Add focused API query validation regression tests"
+  "title": "Add focused API query validation regression tests",
+  "status_updated_at": "2026-06-22T14:32:27Z",
+  "status_reason": "Selected for implementation by the agent loop."
 }

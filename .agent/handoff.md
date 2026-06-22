@@ -2,13 +2,49 @@
 
 ## Current Task
 
-TASK-detector-edge-case-regression-tests — Add detector edge-case regression tests without threshold changes (backend-tests, low risk).
+TASK-api-query-validation-regressions — Add focused API query validation regression tests (backend-tests, low risk).
 
 ## Current Branch
 
-agent_developed (single_work_branch mode; task start commit fd8c8cb)
+agent_developed (single_work_branch mode; task start commit 4ee837aca703611ff94fad43c5ff80a1968851b2)
 
 ## Status
+
+Implementation pass complete. Added seven focused, deterministic, network-free regression tests to `tests/test_api.py` that document the **current** `/readings` and `/events` query validation behavior. No API implementation behavior, response contracts, schemas, storage, or detector code was changed. No follow-up behavior gap was found (validation is consistent across endpoints), so no follow-up task is proposed. (Final task status is set by the wrapper/reviewer, not by Claude.)
+
+### What this task added (20260622 — TASK-api-query-validation-regressions)
+
+All tests use the existing `client`/`db_session` fixtures and `seed_reading` helper from `tests/conftest.py`, matching the conventions of the surrounding tests:
+
+- `test_readings_reject_unknown_city` / `test_events_reject_unknown_city` — a city outside the `CityName` Literal (`Ottawa|Toronto|Vancouver`, `app/main.py:23`) returns `422` from FastAPI query validation.
+- `test_readings_reject_naive_start_datetime` / `test_readings_reject_naive_end_datetime` / `test_events_reject_naive_start_datetime` — a timezone-naive `start`/`end` returns `422` with `detail == "<param> must be timezone-aware"`, documenting `_utc_query_datetime` (`app/main.py:51-56`) for `/readings` and `/events` (previously only `/forecasts` had this coverage). The `end` test confirms the param name flows into the error message.
+- `test_readings_reject_limit_below_minimum` — `limit=0` returns `422` (the `Query(ge=1, ...)` lower bound, `app/main.py:73`).
+- `test_events_limit_validation` — `limit=5001` returns `422` for `/events` (the `le=MAX_API_LIMIT` upper bound; previously only `/readings` was covered).
+- `test_readings_convert_timezone_aware_start_to_utc` — a tz-aware `start` of `18:00+05:00` (= `13:00Z`) filters as `13:00Z`, documenting the `astimezone(timezone.utc)` conversion in `_utc_query_datetime`.
+
+### Changed Files (this task)
+
+- `tests/test_api.py` — added seven regression tests (no existing test removed or weakened).
+- `.agent/handoff.md` — this update.
+
+### Tests Run (this task)
+
+- `.venv/bin/pytest tests/test_api.py -q` — NOT RUN. Gated: code execution requires interactive approval in this autonomous sandbox; read-only `git`/Read/Edit work, but `pytest` returns "This command requires approval". Per operating rules I confirmed the gate and did not bypass/retry.
+- `.venv/bin/python -m pytest tests/test_api.py -q -p no:cacheprovider` — NOT RUN, same gate.
+- Verification by inspection: each new test was traced against `app/main.py` (`CityName` Literal, `_utc_query_datetime`, the `Query(ge=1, le=MAX_API_LIMIT)` bounds) and mirrors the existing `test_forecasts_reject_naive_datetime` / `test_limit_validation` / `test_readings_filtered_by_explicit_range` tests' fixtures and assertion style. A reviewer with shell access should run `pytest tests/test_api.py -q` to confirm green.
+
+### Blockers (this task)
+
+- Bash execution (pytest/ruff) requires interactive approval in this environment and was not run. Residual risk: the new tests are validated by code reading, not execution; a reviewer should run `tests/test_api.py` to confirm.
+
+### Next Steps (this task)
+
+- Reviewer/operator: run `pytest tests/test_api.py -q` (optionally `ruff check tests`) to confirm the additions pass.
+- Human PR review and merge/cherry-pick from `agent_developed` (agents must not merge).
+
+### Prior task content (TASK-detector-edge-case-regression-tests) — retained for history below
+
+## Prior Task (TASK-detector-edge-case-regression-tests)
 
 Implementation pass complete. Added five focused, deterministic, network-free regression tests to `tests/test_native_detectors.py` that document existing detector edge-case behavior. No detector code, thresholds, scoring weights, severity mapping, lifecycle behavior, climatology artifacts, evaluation metrics, or README claims were changed. (Final task status is set by the wrapper/reviewer, not by Claude.)
 
@@ -361,3 +397,13 @@ Other:
 - Status: implemented_by_claude
 - Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
 - Log: .agent/logs/claude-implementer-20260622T135850Z.log
+
+## Script Update 20260622T143228Z
+
+- Current task: TASK-api-query-validation-regressions
+- Current branch: agent_developed
+- Configured work branch: agent_developed
+- Branch mode: single_work_branch
+- Status: implemented_by_claude
+- Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
+- Log: .agent/logs/claude-implementer-20260622T143228Z.log
