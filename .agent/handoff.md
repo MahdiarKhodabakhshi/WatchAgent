@@ -12,6 +12,41 @@ agent_developed (single_work_branch mode; task start commit fd8c8cb)
 
 Implementation pass complete. Added five focused, deterministic, network-free regression tests to `tests/test_native_detectors.py` that document existing detector edge-case behavior. No detector code, thresholds, scoring weights, severity mapping, lifecycle behavior, climatology artifacts, evaluation metrics, or README claims were changed. (Final task status is set by the wrapper/reviewer, not by Claude.)
 
+### Revision Pass 20260622T14 — response to REVIEW-…-20260622T135752Z (Opus session)
+
+The latest review (`verdict: needs_revision`) has two required fixes. Neither is resolvable by editing files in this detector-test task; both are structural. Evidence gathered this session with read-only `git`:
+
+**Required fix #1 — "Narrow the reviewed `fd8c8cb..HEAD` diff to only the detector regression scope; remove/split the unrelated workflow/Telegram/systemd/script changes."**
+
+This is a shared-branch / review-base problem, not a defect in this task's work, and it is not fixable within this task's authority:
+
+- This task's *only* substantive content change is `tests/test_native_detectors.py` (+73), introduced in commit `ed3d0a4`. `git log fd8c8cb..HEAD -- tests/test_native_detectors.py` returns exactly that one commit. The detector test work is clean and isolated.
+- Every file the reviewer flagged comes from *sibling autonomous-infrastructure commits* that landed on the shared `agent_developed` branch between this task's WIP commits, authored by other autonomous activity — not by this task:
+  - `daaa175` Make Codex reviewer use wrapper-gathered context
+  - `3b22d4c` Add Telegram inbound command handling
+  - `727cad6` Add always-on operation: supervisor, opt-in auto-approve, systemd units
+  - `e164573` Push agent notifications to Telegram
+  - `367f35c` Raise implementer turn budget
+  - `7d037cb` Add Claude-only interactive idea pipeline
+  - `5e4199b` Fix systemd PATH
+- Root cause: `single_work_branch` mode puts *all* autonomous work on `agent_developed`, but the reviewer computes the per-task diff from a fixed `task_start_commit` (`fd8c8cb`) captured before those sibling commits existed. So any task reviewed this way inherits every sibling commit made since its start. This is the same branch-scope failure mode recorded earlier for `TASK-docs-setup-verification-audit`.
+- Why I did not "remove/split" them: they are real, already-committed sibling work on a **shared** branch. Dropping them requires rebasing/squashing + force-pushing shared history (forbidden by `AGENTS.md` / operating rules: "must not force-push shared branches, rewrite protected history") and would destroy other agents' work. Creating/splitting to a per-task branch is also disallowed this run ("Do not create, checkout, switch, rename, or merge branches"; single_work_branch mode forbids per-task branches by default). Editing files cannot retroactively remove committed sibling commits from a diff range.
+
+  Recommended operator resolution (outside this detector-test task's authority — pick one):
+  1. Have the reviewer diff only the task's *own* commits (the commit(s) that touch the task's `files_likely_to_change`) instead of the full `task_start_commit..HEAD` range, **or**
+  2. Merge the two-agent infrastructure commits to `main` and advance the review base, so they drop out of the comparison, **or**
+  3. Review the Telegram/systemd/idea-worker/supervisor work under the separate human-approved tasks the reviewer already recommended as follow-ups.
+
+  After any of these, re-running the reviewer against the narrowed diff should pass: the detector tests themselves were assessed as in-scope, deterministic, and network-free in this same review (`tests_check`).
+
+**Required fix #2 — "Run at minimum `pytest tests/test_native_detectors.py -q` and record the result/blocker."**
+
+Attempted this session: `.venv/bin/pytest tests/test_native_detectors.py -q` → returned "This command requires approval" (the harness code-execution permission gate). Read-only `git`/`grep` run without prompting, but `pytest` does not, and there is no interactive approver in this autonomous run, so it fails closed. Per operating rules I confirmed the gate once and did not retry/bypass. Residual risk unchanged: the five tests are validated by source tracing (see prior resume notes), not by execution. A reviewer/operator with shell access must run `pytest tests/test_native_detectors.py -q` to confirm green.
+
+Nothing in the working tree changed this session except this handoff note. No detector code, thresholds, contracts, or out-of-scope files were touched.
+
+`git add`/`git commit` are also gated by the approval layer this session (confirmed), so this handoff edit is left staged-by-wrapper: the `claude-implementer.sh` wrapper commits the working tree (`.agent/handoff.md`) and updates the draft PR after this run, as it does for prior passes. No manual commit was made.
+
 ### Resume note (20260622 — Opus session, independent re-trace)
 
 Resumed after repeated prior sessions stopped on the same `pytest` permission gate. State re-confirmed clean: working tree clean, all five tests present in `tests/test_native_detectors.py` (lines 126, 156, 286, 321, 330) and committed.
@@ -316,3 +351,13 @@ Other:
 - Status: implemented_by_claude
 - Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
 - Log: .agent/logs/claude-implementer-20260622T135524Z.log
+
+## Script Update 20260622T135850Z
+
+- Current task: TASK-detector-edge-case-regression-tests
+- Current branch: agent_developed
+- Configured work branch: agent_developed
+- Branch mode: single_work_branch
+- Status: implemented_by_claude
+- Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
+- Log: .agent/logs/claude-implementer-20260622T135850Z.log
