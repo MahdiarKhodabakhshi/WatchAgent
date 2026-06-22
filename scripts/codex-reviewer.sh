@@ -225,7 +225,7 @@ lines = [
     "",
     f"- Generated at: {generated_at}",
     f"- Verdict: {data['verdict']}",
-    f"- JSON artifact: `{json_path}`",
+    f"- JSON artifact: {json_path}",
     "",
     "## Summary",
     "",
@@ -288,6 +288,108 @@ PY
   render_markdown_review "$json_path" "$markdown_path" "$task_id"
 }
 
+append_plain_block() {
+  local content="$1"
+  local line
+
+  if [ -z "$content" ]; then
+    printf '    (empty)\n'
+    return
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '    %s\n' "$line"
+  done <<< "$content"
+}
+
+append_context_section() {
+  local title="$1"
+  local content="$2"
+
+  printf '## %s\n\n' "$title"
+  append_plain_block "$content"
+  printf '\n'
+}
+
+write_reviewer_context() {
+  local context_path="$1"
+  local task_file="$2"
+  local task_id="$3"
+  local branch="$4"
+  local work_branch="$5"
+  local branch_mode="$6"
+  local task_start_commit="$7"
+  local current_head="$8"
+  local git_status="$9"
+  local diff_stat="${10}"
+  local task_json="${11}"
+  local handoff_content="${12}"
+  local git_diff="${13}"
+
+  {
+    cat <<'CONTEXT'
+You are Codex acting only as Reviewer for this repository.
+
+Review the wrapper-provided task diff against this approved task:
+CONTEXT
+    printf '%s\n' "- Task file: ${task_file}"
+    printf '%s\n' "- Task ID: ${task_id}"
+    printf '\n'
+    cat <<'CONTEXT'
+Branch context:
+CONTEXT
+    printf '%s\n' "- Current branch: ${branch}"
+    printf '%s\n' "- Configured work branch: ${work_branch}"
+    printf '%s\n' "- Branch mode: ${branch_mode}"
+    printf '%s\n' "- task_start_commit: ${task_start_commit}"
+    printf '%s\n' "- Current HEAD: ${current_head}"
+    printf '\n'
+    cat <<'CONTEXT'
+Review only the diff from task_start_commit to HEAD. Ignore older work already present on the work branch before task_start_commit.
+
+Do not review main...HEAD.
+Do not review setup branch...HEAD.
+Do not treat older work already on the configured work branch before task_start_commit as part of this task.
+Codex must not run shell commands.
+Codex must not run Bash, git, gh, or file-inspection commands.
+Codex must not modify files.
+Codex must emit structured review JSON only.
+
+Return a single JSON object only. It must match .agent/schemas/review.schema.json exactly. Use this shape:
+CONTEXT
+    printf '{\n'
+    printf '  "task_id": "%s",\n' "$task_id"
+    cat <<'CONTEXT'
+  "verdict": "accepted | needs_revision | blocked",
+  "summary": "...",
+  "scope_check": "...",
+  "tests_check": "...",
+  "docs_check": "...",
+  "security_check": "...",
+  "required_fixes": ["..."],
+  "recommended_followups": ["..."]
+}
+
+Reviewer rules:
+- Codex may not modify app source.
+- Codex may only write review artifacts through the wrapper output.
+- Check acceptance criteria, tests, docs, security, architecture, and scope.
+- If implementation is incomplete but fixable within the original approved scope, use verdict "needs_revision".
+- If the task needs a human decision, use verdict "blocked".
+- If a context section reports a wrapper collection error, use verdict "blocked".
+- If accepted, do not merge; human still reviews and merges or cherry-picks to main or master.
+- Put blocking required changes in required_fixes. Include file and line references when available.
+- Use recommended_followups only for non-blocking work that should not expand the approved task.
+
+CONTEXT
+    append_context_section "Git Status" "$git_status"
+    append_context_section "Diff Stat (${task_start_commit}..HEAD)" "$diff_stat"
+    append_context_section "Task JSON" "$task_json"
+    append_context_section "Handoff" "$handoff_content"
+    append_context_section "Git Diff (${task_start_commit}..HEAD)" "$git_diff"
+  } > "$context_path"
+}
+
 read_run_state() {
   local task_id="$1"
   python3 - "$task_id" <<'PY'
@@ -332,6 +434,9 @@ if not isinstance(branch, str) or not branch:
     raise SystemExit(1)
 if not isinstance(task_start_commit, str) or not task_start_commit:
     print(f"Run-state is missing task_start_commit: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9A-Fa-f]{7,64}", task_start_commit):
+    print(f"Run-state task_start_commit has invalid format in {path}.", file=sys.stderr)
     raise SystemExit(1)
 if mode != "single_work_branch":
     print(f"Run-state mode must be single_work_branch: {path}", file=sys.stderr)
@@ -381,80 +486,8 @@ mkdir -p .agent/logs .agent/reviews .agent/tmp
 timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
 review_md_path=".agent/reviews/REVIEW-${task_id}-${timestamp}.md"
 review_json_path=".agent/reviews/REVIEW-${task_id}-${timestamp}.json"
-prompt_path=".agent/tmp/review-prompt-${task_id}-${timestamp}.md"
+context_path=".agent/tmp/reviewer-context-${task_id}-${timestamp}.md"
 log_path=".agent/logs/codex-reviewer-${timestamp}.log"
-
-case "$AGENT_BRANCH_MODE" in
-  single_work_branch)
-    if ! run_state_line="$(read_run_state "$task_id" 2>&1)"; then
-      write_blocked_review \
-        "$task_id" \
-        "$review_json_path" \
-        "$review_md_path" \
-        "Missing or invalid run-state for ${task_id}; task_start_commit is required for single_work_branch review." \
-        "Run scripts/agent-loop.sh for this task to create .agent/run-state/${task_id}.json, or rerun with --reset-task-base after manually confirming the current HEAD should be the new task base. Detail: ${run_state_line}"
-      printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
-      exit 0
-    fi
-    IFS=$'\t' read -r run_state_branch task_start_commit run_state_mode <<< "$run_state_line"
-    if [ "$run_state_branch" != "$branch" ]; then
-      write_blocked_review \
-        "$task_id" \
-        "$review_json_path" \
-        "$review_md_path" \
-        "Run-state branch ${run_state_branch} does not match current branch ${branch}." \
-        "Switch to ${run_state_branch} or reset the task base on ${branch} with scripts/agent-loop.sh --reset-task-base after confirming the current HEAD should be the new task base."
-      printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
-      exit 0
-    fi
-    ;;
-  *)
-    fail "Unsupported AGENT_BRANCH_MODE: $AGENT_BRANCH_MODE"
-    ;;
-esac
-
-current_head="$(git rev-parse HEAD)"
-if ! git rev-parse --verify "${task_start_commit}^{commit}" >/dev/null 2>&1; then
-  write_blocked_review \
-    "$task_id" \
-    "$review_json_path" \
-    "$review_md_path" \
-    "task_start_commit ${task_start_commit} is not a valid commit in this repository." \
-    "Repair .agent/run-state/${task_id}.json or rerun scripts/agent-loop.sh --reset-task-base after manually confirming the current HEAD should be the new task base."
-  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
-  exit 0
-fi
-
-if ! git_status="$(git status --short --branch 2>&1)"; then
-  write_blocked_review \
-    "$task_id" \
-    "$review_json_path" \
-    "$review_md_path" \
-    "Wrapper could not gather git status for ${task_id}." \
-    "Fix git status collection before rerunning review. Detail: ${git_status}"
-  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
-  exit 0
-fi
-if ! diff_stat="$(git diff --stat "${task_start_commit}..HEAD" 2>&1)"; then
-  write_blocked_review \
-    "$task_id" \
-    "$review_json_path" \
-    "$review_md_path" \
-    "Wrapper could not gather git diff --stat for ${task_id} from task_start_commit to HEAD." \
-    "Fix the task_start_commit or repository state before rerunning review. Detail: ${diff_stat}"
-  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
-  exit 0
-fi
-if ! git_diff="$(git diff "${task_start_commit}..HEAD" 2>&1)"; then
-  write_blocked_review \
-    "$task_id" \
-    "$review_json_path" \
-    "$review_md_path" \
-    "Wrapper could not gather git diff for ${task_id} from task_start_commit to HEAD." \
-    "Fix the task_start_commit or repository state before rerunning review. Detail: ${git_diff}"
-  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
-  exit 0
-fi
 
 task_json="$(cat "$task_file")"
 if [ -f .agent/handoff.md ]; then
@@ -463,85 +496,170 @@ else
   handoff_content="No .agent/handoff.md present."
 fi
 
-{
-  cat <<PROMPT
-You are Codex acting only as Reviewer for this repository.
+if current_head_output="$(git rev-parse HEAD 2>&1)"; then
+  current_head="$current_head_output"
+else
+  current_head_exit="$?"
+  current_head="$(printf 'ERROR: git rev-parse HEAD failed with exit status %s.\n%s' "$current_head_exit" "$current_head_output")"
+fi
 
-Review the wrapper-provided task diff against this approved task:
-- Task file: ${task_file}
-- Task ID: ${task_id}
+if git_status_output="$(git status --short --branch 2>&1)"; then
+  git_status="$git_status_output"
+  [ -n "$git_status" ] || git_status="git status --short --branch produced no output."
+else
+  git_status_exit="$?"
+  git_status="$(printf 'ERROR: git status --short --branch failed with exit status %s.\n%s' "$git_status_exit" "$git_status_output")"
+fi
 
-Branch context:
-- Current branch: ${branch}
-- Configured work branch: ${AGENT_WORK_BRANCH}
-- Branch mode: ${AGENT_BRANCH_MODE}
-- task_start_commit: ${task_start_commit}
-- Current HEAD: ${current_head}
+case "$AGENT_BRANCH_MODE" in
+  single_work_branch)
+    if ! run_state_line="$(read_run_state "$task_id" 2>&1)"; then
+      task_start_commit="UNAVAILABLE"
+      diff_stat="Not collected because task_start_commit/run-state is missing or invalid for single_work_branch review. Detail: ${run_state_line}"
+      git_diff="$diff_stat"
+      write_reviewer_context \
+        "$context_path" \
+        "$task_file" \
+        "$task_id" \
+        "$branch" \
+        "$AGENT_WORK_BRANCH" \
+        "$AGENT_BRANCH_MODE" \
+        "$task_start_commit" \
+        "$current_head" \
+        "$git_status" \
+        "$diff_stat" \
+        "$task_json" \
+        "$handoff_content" \
+        "$git_diff"
+      write_blocked_review \
+        "$task_id" \
+        "$review_json_path" \
+        "$review_md_path" \
+        "Missing or invalid task_start_commit/run-state for ${task_id}; task_start_commit is required for single_work_branch review." \
+        "Run scripts/agent-loop.sh for this task to create .agent/run-state/${task_id}.json, or rerun with --reset-task-base after manually confirming the current HEAD should be the new task base. Detail: ${run_state_line}"
+      printf 'Codex reviewer blocked before Codex run. Context: %s Review: %s JSON: %s\n' "$context_path" "$review_md_path" "$review_json_path"
+      exit 0
+    fi
+    IFS=$'\t' read -r run_state_branch task_start_commit run_state_mode <<< "$run_state_line"
+    if [ -z "${task_start_commit:-}" ]; then
+      task_start_commit="UNAVAILABLE"
+      diff_stat="Not collected because task_start_commit/run-state is missing for single_work_branch review."
+      git_diff="$diff_stat"
+      write_reviewer_context \
+        "$context_path" \
+        "$task_file" \
+        "$task_id" \
+        "$branch" \
+        "$AGENT_WORK_BRANCH" \
+        "$AGENT_BRANCH_MODE" \
+        "$task_start_commit" \
+        "$current_head" \
+        "$git_status" \
+        "$diff_stat" \
+        "$task_json" \
+        "$handoff_content" \
+        "$git_diff"
+      write_blocked_review \
+        "$task_id" \
+        "$review_json_path" \
+        "$review_md_path" \
+        "Missing task_start_commit/run-state for ${task_id}; task_start_commit is required for single_work_branch review." \
+        "Repair .agent/run-state/${task_id}.json or rerun scripts/agent-loop.sh --reset-task-base after manually confirming the current HEAD should be the new task base."
+      printf 'Codex reviewer blocked before Codex run. Context: %s Review: %s JSON: %s\n' "$context_path" "$review_md_path" "$review_json_path"
+      exit 0
+    fi
+    if [ "$run_state_branch" != "$branch" ]; then
+      diff_stat="Not collected because run-state branch ${run_state_branch} does not match current branch ${branch}."
+      git_diff="$diff_stat"
+      write_reviewer_context \
+        "$context_path" \
+        "$task_file" \
+        "$task_id" \
+        "$branch" \
+        "$AGENT_WORK_BRANCH" \
+        "$AGENT_BRANCH_MODE" \
+        "$task_start_commit" \
+        "$current_head" \
+        "$git_status" \
+        "$diff_stat" \
+        "$task_json" \
+        "$handoff_content" \
+        "$git_diff"
+      write_blocked_review \
+        "$task_id" \
+        "$review_json_path" \
+        "$review_md_path" \
+        "Run-state branch ${run_state_branch} does not match current branch ${branch}." \
+        "Switch to ${run_state_branch} or reset the task base on ${branch} with scripts/agent-loop.sh --reset-task-base after confirming the current HEAD should be the new task base."
+      printf 'Codex reviewer blocked before Codex run. Context: %s Review: %s JSON: %s\n' "$context_path" "$review_md_path" "$review_json_path"
+      exit 0
+    fi
+    ;;
+  *)
+    fail "Unsupported AGENT_BRANCH_MODE: $AGENT_BRANCH_MODE"
+    ;;
+esac
 
-Review only the diff from task_start_commit to HEAD. Ignore older work already present on the work branch before task_start_commit.
+if ! git rev-parse --verify "${task_start_commit}^{commit}" >/dev/null 2>&1; then
+  diff_stat="Not collected because task_start_commit ${task_start_commit} is not a valid commit in this repository."
+  git_diff="$diff_stat"
+  write_reviewer_context \
+    "$context_path" \
+    "$task_file" \
+    "$task_id" \
+    "$branch" \
+    "$AGENT_WORK_BRANCH" \
+    "$AGENT_BRANCH_MODE" \
+    "$task_start_commit" \
+    "$current_head" \
+    "$git_status" \
+    "$diff_stat" \
+    "$task_json" \
+    "$handoff_content" \
+    "$git_diff"
+  write_blocked_review \
+    "$task_id" \
+    "$review_json_path" \
+    "$review_md_path" \
+    "task_start_commit ${task_start_commit} is not a valid commit in this repository." \
+    "Repair .agent/run-state/${task_id}.json or rerun scripts/agent-loop.sh --reset-task-base after manually confirming the current HEAD should be the new task base."
+  printf 'Codex reviewer blocked before Codex run. Context: %s Review: %s JSON: %s\n' "$context_path" "$review_md_path" "$review_json_path"
+  exit 0
+fi
 
-Do not review main...HEAD.
-Do not review setup branch...HEAD.
-Do not treat older work already on ${AGENT_WORK_BRANCH} before task_start_commit as part of this task.
-Codex must not run shell commands.
-Codex must not run Bash, git, gh, or file-inspection commands.
-Codex must emit structured review JSON only.
+diff_range="${task_start_commit}..HEAD"
+if diff_stat_output="$(git diff --stat "$diff_range" 2>&1)"; then
+  diff_stat="$diff_stat_output"
+  [ -n "$diff_stat" ] || diff_stat="git diff --stat ${diff_range} produced no output."
+else
+  diff_stat_exit="$?"
+  diff_stat="$(printf 'ERROR: git diff --stat %s failed with exit status %s.\n%s' "$diff_range" "$diff_stat_exit" "$diff_stat_output")"
+fi
 
-Return a single JSON object only. It must match .agent/schemas/review.schema.json exactly:
-{
-  "task_id": "${task_id}",
-  "verdict": "accepted | needs_revision | blocked",
-  "summary": "...",
-  "scope_check": "...",
-  "tests_check": "...",
-  "docs_check": "...",
-  "security_check": "...",
-  "required_fixes": ["..."],
-  "recommended_followups": ["..."]
-}
+if git_diff_output="$(git diff "$diff_range" 2>&1)"; then
+  git_diff="$git_diff_output"
+  [ -n "$git_diff" ] || git_diff="git diff ${diff_range} produced no output."
+else
+  git_diff_exit="$?"
+  git_diff="$(printf 'ERROR: git diff %s failed with exit status %s.\n%s' "$diff_range" "$git_diff_exit" "$git_diff_output")"
+fi
 
-Reviewer rules:
-- Codex may not modify app source.
-- Codex may only write review artifacts through the wrapper output.
-- Check acceptance criteria, tests, docs, security, architecture, and scope.
-- If implementation is incomplete but fixable within the original approved scope, use verdict "needs_revision".
-- If the task needs a human decision, use verdict "blocked".
-- If accepted, do not merge; human still reviews and merges/cherry-picks to main or master.
-- Put blocking required changes in required_fixes. Include file and line references when available.
-- Use recommended_followups only for non-blocking work that should not expand the approved task.
+write_reviewer_context \
+  "$context_path" \
+  "$task_file" \
+  "$task_id" \
+  "$branch" \
+  "$AGENT_WORK_BRANCH" \
+  "$AGENT_BRANCH_MODE" \
+  "$task_start_commit" \
+  "$current_head" \
+  "$git_status" \
+  "$diff_stat" \
+  "$task_json" \
+  "$handoff_content" \
+  "$git_diff"
 
-## Git Status
-
-```text
-${git_status}
-```
-
-## Diff Stat (${task_start_commit}..HEAD)
-
-```text
-${diff_stat}
-```
-
-## Task JSON
-
-```json
-${task_json}
-```
-
-## Handoff
-
-```markdown
-${handoff_content}
-```
-
-## Git Diff (${task_start_commit}..HEAD)
-
-```diff
-${git_diff}
-```
-PROMPT
-} > "$prompt_path"
-
+printf 'Writing Codex reviewer context to %s\n' "$context_path"
 printf 'Writing Codex review JSON to %s\n' "$review_json_path"
 printf 'Writing Codex reviewer log to %s\n' "$log_path"
 
@@ -551,7 +669,7 @@ codex -C "$ROOT_DIR" -s read-only -a never exec \
   --ephemeral \
   --output-schema ".agent/schemas/review.schema.json" \
   --output-last-message "$review_json_path" \
-  - < "$prompt_path" 2>&1 | tee "$log_path"
+  - < "$context_path" 2>&1 | tee "$log_path"
 codex_exit="${PIPESTATUS[0]}"
 set -e
 

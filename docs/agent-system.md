@@ -240,6 +240,8 @@ It does not review `main...HEAD` or any setup branch diff. Older work already pr
 
 The wrapper provides Codex with the current branch, configured work branch, branch mode, `task_start_commit`, current `HEAD`, git status, diff stat, full diff, task JSON, and `.agent/handoff.md` content. Codex is instructed not to run shell, Bash, git, gh, or file-inspection commands and to emit structured review JSON only.
 
+The reviewer writes gathered context to `.agent/tmp/reviewer-context-<TASK-ID>-<timestamp>.md`. Shell-generated reviewer context uses plain indented text sections instead of Markdown backtick fences so task JSON, handoff text, and diffs cannot be interpreted by Bash while the context file is built. If `.agent/run-state/<TASK-ID>.json` is missing, invalid, or lacks `task_start_commit` in `single_work_branch` mode, the reviewer writes a blocked review artifact before calling Codex.
+
 The reviewer writes:
 
 - `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.json`
