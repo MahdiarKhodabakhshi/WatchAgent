@@ -5,11 +5,11 @@ This repository uses a local, subscription-first autonomous loop:
 1. The wrapper gathers repository context.
 2. Codex emits delta planner JSON only.
 3. The wrapper validates and materializes plans, new tasks, and missing approvals.
-4. If no actionable approved task exists, the wrapper notifies the human and stops, unless `--forever` is active.
+4. If no actionable approved task exists, the wrapper can run the planner and then notifies the human when only proposed work remains.
 5. Claude Code implements exactly one actionable task.
 6. Claude or the wrapper opens or updates a draft PR when possible.
 7. Codex reviews the branch and writes structured review artifacts.
-8. The loop updates task state from the review verdict.
+8. The loop updates task state from the review verdict and automatically sends `needs_revision` work back to Claude within a bounded revision loop.
 9. In `--forever` mode, the loop sleeps and repeats.
 
 Agents never push directly to `main` or `master`, never merge PRs, and never use API-key backed automation for this workflow.
@@ -46,9 +46,27 @@ From a non-main branch:
 scripts/agent-loop.sh
 ```
 
-The default runs one complete cycle: plan, select one actionable task, implement, open or update a draft PR, review, update task state, checkpoint, then stop. It refuses to run on `main` or `master`.
+The default runs one complete task cycle: select one actionable task, implement it, open or update a draft PR, review it, and keep sending that same task back to Claude while Codex returns `needs_revision`, up to the revision limit. It then updates task state, checkpoints, and stops. It refuses to run on `main` or `master`.
 
-If planning fails but an existing `approved`, `in_progress`, or `needs_revision` task is already available, the loop records the planner failure and continues with that one actionable task. If planning fails and no actionable task exists, the loop writes a `loop_failed` notification and stops.
+`--once` is an explicit alias for the default one-cycle behavior:
+
+```bash
+scripts/agent-loop.sh --once
+```
+
+Task selection happens before planning. The loop picks the first actionable task in deterministic priority order: `needs_revision`, then `in_progress`, then `approved`. If no actionable task exists, it runs the planner unless `--skip-planner` is passed. If the planner creates only proposed tasks, the loop writes an `approval_needed` notification and stops in one-cycle mode.
+
+Use `--skip-planner` when you only want to continue existing approved or revision work:
+
+```bash
+scripts/agent-loop.sh --skip-planner
+```
+
+The revision limit defaults to 3 Claude revision passes after review feedback:
+
+```bash
+scripts/agent-loop.sh --max-revisions-per-task 2
+```
 
 ## Forever Mode
 
@@ -63,9 +81,10 @@ Useful options:
 ```bash
 scripts/agent-loop.sh --forever --sleep-seconds 1800
 scripts/agent-loop.sh --forever --max-iterations 3
+scripts/agent-loop.sh --forever --max-revisions-per-task 3
 ```
 
-The loop sleeps between cycles and stops after more than 3 consecutive planner/reviewer/checkpoint failures. `Ctrl+C` stops safely. Claude auth, usage, or max-turn stops terminate immediately after checkpointing.
+The loop sleeps between cycles and stops after 3 consecutive planner/reviewer/checkpoint failures. `Ctrl+C` stops safely. After `implemented`, `blocked`, `approval_needed`, `usage_limit`, or `auth_failed`, forever mode sleeps before the next outer cycle instead of retrying immediately.
 
 ## Approval Gate
 
@@ -87,6 +106,8 @@ If no actionable task exists, the loop writes a notification and prints:
 No approved tasks. Review .agent/approvals/pending/ and approve one with scripts/agent-approve.sh TASK-ID.
 ```
 
+Proposed tasks still require human approval before Claude may implement them.
+
 ## Task Status Lifecycle
 
 Allowed task statuses:
@@ -94,7 +115,7 @@ Allowed task statuses:
 - `proposed`: Planned but not approved.
 - `approved`: Human approved and eligible for implementation.
 - `in_progress`: Selected by the implementer.
-- `needs_revision`: Codex review found required fixes inside the original approved scope.
+- `needs_revision`: Codex review found required fixes inside the original approved scope; Claude may fix these without new approval if the fix stays in that scope.
 - `implemented`: Codex review accepted the implementation; human PR review and merge are still required.
 - `blocked`: Human decision or external access is needed.
 - `rejected`: Human rejected the proposed task.
@@ -137,7 +158,9 @@ Or pass an explicit task id:
 scripts/claude-implementer.sh TASK-ID
 ```
 
-The script marks the task `in_progress`, switches to `agent/<task-id-slug>`, runs Claude Code with subscription auth, asks Claude to update `.agent/handoff.md`, commits implementation changes when possible, pushes the task branch, and opens or updates a draft PR when `gh` can do so.
+For an `approved` task, the script marks it `in_progress`, switches to `agent/<task-id-slug>`, runs Claude Code with subscription auth, asks Claude to update `.agent/handoff.md`, commits implementation changes when possible, pushes the task branch, and opens or updates a draft PR when `gh` can do so.
+
+For a `needs_revision` task, the prompt tells Claude to read the latest `.agent/reviews/REVIEW-<TASK-ID>-*.json` and fix only `required_fixes` within the original approved task scope. It does not create a new task or ask for new approval for in-scope review fixes.
 
 Claude must not mark the task implemented. The review verdict controls final status.
 
@@ -157,7 +180,7 @@ The reviewer runs Codex in read-only mode and writes:
 The JSON verdict is one of:
 
 - `accepted`: loop marks the task `implemented`, writes a completion note, and notifies the human that the PR is ready.
-- `needs_revision`: loop marks the same task `needs_revision`; the next cycle sends it back to Claude without new approval if fixes stay in scope.
+- `needs_revision`: loop marks the same task `needs_revision`; the same one-cycle run sends it back to Claude without new approval if fixes stay in scope, until the review is accepted, blocked, or `--max-revisions-per-task` is reached.
 - `blocked`: loop marks the task `blocked` and notifies the human.
 
 Accepted does not mean merged. Humans still review and merge PRs.
@@ -171,7 +194,7 @@ scripts/agent-notify.sh approval_needed
 scripts/agent-notify.sh review_ready TASK-ID
 ```
 
-Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready`, `auth_failed`, `usage_limit`, and `loop_failed`. Each notification includes the reason, timestamp, branch, current actionable task, pending approvals, and the next command for the human.
+Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready`, `auth_failed`, `usage_limit`, `loop_failed`, and `max_revisions_reached`. Each notification includes the reason, timestamp, branch, current actionable task, pending approvals, and the next command for the human.
 
 GitHub issue creation is best-effort. If `gh` is authenticated and a remote exists, approval and review notifications can create or comment on issues labeled `agent/approval-needed` or `agent/review-needed`. GitHub is not required for success.
 
@@ -190,13 +213,15 @@ For Claude auth errors:
 3. Confirm API-key environment variables are unset.
 4. Re-run `scripts/agent-loop.sh` or `scripts/claude-implementer.sh TASK-ID`.
 
-For usage or max-turn stops:
+For usage, auth, or max-turn stops:
 
 1. Inspect `.agent/handoff.md`.
-2. Wait for usage to reset, or increase `CLAUDE_MAX_TURNS` for a scoped retry.
+2. Re-authenticate when needed, wait for usage to reset, or increase `CLAUDE_MAX_TURNS` for a scoped retry.
 3. Resume the same task with `scripts/agent-loop.sh`.
 
-For planner failures, inspect `.agent/logs/agent-loop-events.log` and the latest Codex planner log. Already-actionable approved, in-progress, or revision work can still continue through the loop. For reviewer or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause.
+For planner failures, inspect `.agent/logs/agent-loop-events.log` and the latest Codex planner log. Already-actionable approved, in-progress, or revision work can still continue through the loop because task selection happens before planning. For reviewer or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause.
+
+For max revision stops, inspect the latest review JSON and `.agent/handoff.md`. The task is marked `blocked`; a human can manually intervene or approve a new scoped task.
 
 ## Avoid Paid API Usage
 

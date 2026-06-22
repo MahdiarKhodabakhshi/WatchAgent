@@ -185,6 +185,16 @@ markdown_path.write_text("\n".join(lines), encoding="utf-8")
 PY
 }
 
+classify_codex_failure() {
+  if grep -Eiq 'auth|oauth|login|not authenticated|not logged in|unauthorized|forbidden' "$log_path"; then
+    printf 'auth_failed\n'
+  elif grep -Eiq 'usage limit|session limit|rate limit|quota|too many requests|exceeded|overloaded' "$log_path"; then
+    printf 'usage_limit\n'
+  else
+    printf 'failed\n'
+  fi
+}
+
 if [ "$#" -gt 1 ]; then
   usage
   exit 2
@@ -269,11 +279,37 @@ codex_exit="${PIPESTATUS[0]}"
 set -e
 
 if [ "$codex_exit" -ne 0 ]; then
-  fail "Codex reviewer exited with status $codex_exit. See $log_path"
+  failure_kind="$(classify_codex_failure)"
+  case "$failure_kind" in
+    usage_limit)
+      printf 'Codex reviewer usage or session limit detected. See %s\n' "$log_path" >&2
+      exit 20
+      ;;
+    auth_failed)
+      printf 'Codex reviewer authentication failure detected. See %s\n' "$log_path" >&2
+      exit 21
+      ;;
+    *)
+      fail "Codex reviewer exited with status $codex_exit. See $log_path"
+      ;;
+  esac
 fi
 
 if [ ! -s "$review_json_path" ]; then
-  fail "Codex reviewer did not produce JSON at $review_json_path. See $log_path"
+  failure_kind="$(classify_codex_failure)"
+  case "$failure_kind" in
+    usage_limit)
+      printf 'Codex reviewer usage or session limit detected before JSON output. See %s\n' "$log_path" >&2
+      exit 20
+      ;;
+    auth_failed)
+      printf 'Codex reviewer authentication failure detected before JSON output. See %s\n' "$log_path" >&2
+      exit 21
+      ;;
+    *)
+      fail "Codex reviewer did not produce JSON at $review_json_path. See $log_path"
+      ;;
+  esac
 fi
 
 render_markdown_review "$review_json_path" "$review_md_path" "$task_id"

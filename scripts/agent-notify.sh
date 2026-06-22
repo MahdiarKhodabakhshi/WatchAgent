@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 usage() {
   printf 'Usage: scripts/agent-notify.sh REASON [TASK-ID]\n' >&2
-  printf 'Reasons: approval_needed, implementation_blocked, review_ready, auth_failed, usage_limit, loop_failed\n' >&2
+  printf 'Reasons: approval_needed, implementation_blocked, review_ready, auth_failed, usage_limit, loop_failed, max_revisions_reached\n' >&2
 }
 
 fail() {
@@ -23,7 +23,7 @@ if [ -z "$reason" ]; then
 fi
 
 case "$reason" in
-  approval_needed|implementation_blocked|review_ready|auth_failed|usage_limit|loop_failed)
+  approval_needed|implementation_blocked|review_ready|auth_failed|usage_limit|loop_failed|max_revisions_reached)
     ;;
   *)
     usage
@@ -80,6 +80,9 @@ next_command() {
       ;;
     loop_failed)
       printf 'Inspect .agent/logs/agent-loop-events.log and rerun scripts/agent-loop.sh after fixing the cause.\n'
+      ;;
+    max_revisions_reached)
+      printf 'Inspect the latest .agent/reviews/ entry and .agent/handoff.md, then decide whether to approve a new task or manually intervene.\n'
       ;;
   esac
 }

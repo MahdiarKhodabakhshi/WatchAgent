@@ -184,6 +184,11 @@ esac
 task_title="$(json_field "$task_file" title)"
 [ -n "$task_title" ] || task_title="$task_id"
 
+revision_prompt=""
+if [ "$task_status" = "needs_revision" ]; then
+  revision_prompt="This task has review feedback. Read the latest .agent/reviews/REVIEW-${task_id}-*.json and fix only the required_fixes within the original approved task scope."
+fi
+
 claude_max_turns="${CLAUDE_MAX_TURNS:-16}"
 case "$claude_max_turns" in
   ''|*[!0-9]*|0)
@@ -202,7 +207,9 @@ if [ "$current_branch" != "$branch_name" ]; then
   fi
 fi
 
-scripts/agent-task-state.py mark-in-progress "$task_id"
+if [ "$task_status" = "approved" ]; then
+  scripts/agent-task-state.py mark-in-progress "$task_id"
+fi
 
 mkdir -p .agent/logs
 timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
@@ -216,9 +223,13 @@ Implement exactly one actionable task:
 - Task ID: ${task_id}
 - Task title: ${task_title}
 
+${revision_prompt}
+
 Rules:
 - Read AGENTS.md, .agent/operating_rules.md, .agent/handoff.md, and the task file before editing.
 - Implement only this task. Do not expand scope or start another task.
+- Do not create a new task for review fixes.
+- Do not ask for new human approval for needs_revision fixes when required fixes stay within the original approved task scope.
 - Do not create, modify, print, or request secrets.
 - Do not use paid API-key auth.
 - Do not modify auth, security-sensitive behavior, database migrations, deployment, payment or billing behavior, destructive-command behavior, or external services unless the approved task explicitly says to do so.
