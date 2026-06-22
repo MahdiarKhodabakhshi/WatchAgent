@@ -37,7 +37,7 @@
   "objective": "Strengthen confidence in existing `/readings` and `/events` query validation behavior with focused tests that document current API contracts without changing behavior.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "in_progress",
+  "status": "blocked",
   "task_id": "TASK-api-query-validation-regressions",
   "test_plan": [
     "Run `pytest tests/test_api.py`.",
@@ -45,6 +45,6 @@
     "Record commands, results, and any failures in `.agent/handoff.md`."
   ],
   "title": "Add focused API query validation regression tests",
-  "status_updated_at": "2026-06-22T04:50:42Z",
-  "status_reason": "Selected for implementation by the agent loop."
+  "status_updated_at": "2026-06-22T04:54:55Z",
+  "status_reason": "Review could not be completed because read-only command execution failed after the required setup reads, preventing inspection of the branch diff, changed test file, and PR context."
 }

@@ -1,0 +1,34 @@
+# Codex Review: TASK-api-query-validation-regressions
+
+- Generated at: 2026-06-22T04:54:54Z
+- Verdict: blocked
+- JSON artifact: `.agent/reviews/REVIEW-TASK-api-query-validation-regressions-20260622T045259Z.json`
+
+## Summary
+
+Review could not be completed because read-only command execution failed after the required setup reads, preventing inspection of the branch diff, changed test file, and PR context.
+
+## Scope Check
+
+AGENTS.md, operating rules, handoff, task file, and review schema were read. Current branch was reported as agent/task-api-query-validation-regressions with no dirty files before command execution began failing. I could not verify the actual code diff against the approved scope.
+
+## Tests Check
+
+Tests were not run because the user restricted this review to read-only commands. The handoff records that Claude also did not run pytest or ruff due sandbox approval limits, but I could not inspect the added tests directly.
+
+## Docs Check
+
+Handoff was updated for this task and records changed files, verification limitations, blockers, and follow-up ideas. I could not verify whether any additional documentation changes were absent from the diff.
+
+## Security Check
+
+No security issue was identified from the task metadata or handoff, and the task appears test-only by description. I could not independently verify that no forbidden files, secrets, external services, API behavior, package, deployment, auth, billing, or database changes were included.
+
+## Required Fixes
+
+- Re-run the review in an environment where read-only commands can inspect the branch diff and changed files. The blocking failure was: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted.
+- Before acceptance, inspect tests/test_api.py and the branch diff against main, and confirm the added tests are within TASK-api-query-validation-regressions scope.
+
+## Recommended Followups
+
+- After the environment issue is resolved, run or obtain results for pytest tests/test_api.py -q and ruff check tests/test_api.py if permitted by the workflow.
