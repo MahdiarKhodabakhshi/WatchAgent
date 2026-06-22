@@ -10,7 +10,37 @@ agent/task-docs-setup-verification-audit
 
 ## Status
 
-Implementation work complete for this run; awaiting Codex review and human PR review. (Final task status is set by the wrapper/reviewer, not by Claude.)
+Docs content for this task is complete and was accepted by the latest review. The remaining required fix is a **branch-structure / repo-management issue that cannot be resolved by a docs-only edit** — see "Revision Pass 20260622 (second — branch scope)" immediately below. (Final task status is set by the wrapper/reviewer, not by Claude.)
+
+### Revision Pass 20260622 (second — branch scope)
+
+Reviewed `.agent/reviews/REVIEW-TASK-docs-setup-verification-audit-20260622T035236Z.json`. The review's `docs_check`, `tests_check`, and `security_check` confirm the README setup/troubleshooting/verification documentation and the handoff verification record now satisfy the task. The single `required_fix` is:
+
+> "Remove the out-of-scope agent workflow/script/schema changes from this task branch, or split them into a separate human-approved task/PR."
+
+Investigation (read-only `git` only) shows these flagged changes are **not** part of this docs task and cannot be removed by a docs edit:
+
+- The two docs-task implement commits change only docs/handoff/task files:
+  - `a1dc8b3` → `README.md` (the accepted docs work), `.agent/handoff.md`, `.agent/tasks/TASK-docs-setup-verification-audit.json` (plus some planner artifacts swept in by the wrapper).
+  - `730b731` → `.agent/handoff.md` only.
+- Every file the reviewer flagged was changed **only** by separate two-agent *infrastructure* commits, never by the docs-task commits:
+  - `scripts/agent-loop.sh`, `scripts/agent-notify.sh`, `docs/agent-system.md` → `5474ada` "Drive approved tasks through bounded revision loop"
+  - `scripts/materialize-planner-output.py` → `8698f06` "Make planner materialization support existing tasks"
+  - `scripts/agent-task-state.py`, `.agent/schemas/task.schema.json` → `18fb88f` "Set up two-agent development system" / `0b5b76f` "Add autonomous two-agent orchestration loop"
+- Root cause: the entire two-agent system (`.agent/`, `AGENTS.md`, `docs/agent-system.md`, `scripts/agent-*.sh`, schemas) has never been merged to `main`. The reviewer diffs `main...HEAD`, so all of that infrastructure appears inside this docs PR even though this task did not author it.
+
+Why I did not "remove" them on this branch:
+
+- Doing so requires rewriting shared branch history (dropping/squashing the infrastructure commits) — forbidden by `.agent/operating_rules.md` (no rewriting protected/shared history, no bypassing review/branch gates) and outside the approved docs-only scope.
+- Those infrastructure commits contain the wrapper/loop scripts (`scripts/agent-loop.sh`, `scripts/claude-implementer.sh`, `scripts/codex-reviewer.sh`) that are driving this very session; reverting them on the working branch would break the running loop.
+- `git push` / `gh` / rebase all require interactive approval in this sandbox and were not run.
+
+Recommended operator resolution (outside this docs task's authority):
+
+1. Merge the two-agent infrastructure (commits `18fb88f`, `0b5b76f`, `8698f06`, `5474ada`, etc.) to `main` first, **or**
+2. Rebase/retarget this docs branch onto a base that already contains that infrastructure, so the docs PR diff is limited to `README.md` + `.agent/handoff.md`.
+
+After either step, re-running the reviewer against the narrowed diff should pass, since the docs content itself is already accepted.
 
 ### Revision Pass 20260622 (review fix)
 
@@ -52,7 +82,8 @@ Other:
 
 ## Failures / Blockers
 
-- Bash verification commands (`ruff`, `pytest`, `git`) require interactive approval in this environment and were therefore not executed. A reviewer with shell access should run `.venv/bin/ruff check app tests scripts` and `.venv/bin/pytest -q` to confirm the repo is green; these are unaffected by a docs-only change.
+- **Branch-scope required fix is not actionable as a docs edit (primary blocker).** The review asks to remove out-of-scope workflow/script/schema changes from the branch. Those changes belong to the two-agent infrastructure commits (`18fb88f`, `0b5b76f`, `8698f06`, `5474ada`), not to this docs task, and removing them needs shared-history rewriting + `git push`/rebase (forbidden by operating rules and blocked by the approval gate) and would break the live loop scripts. This needs the operator step in "Revision Pass 20260622 (second — branch scope)" above. The docs content itself was accepted by the review.
+- Bash verification commands (`ruff`, `pytest`, `git` mutations) require interactive approval in this environment and were therefore not executed. Read-only `git log`/`git show`/`git diff --stat` succeeded and were used for the branch-scope analysis above. A reviewer with shell access should run `.venv/bin/ruff check app tests scripts` and `.venv/bin/pytest -q` to confirm the repo is green; these are unaffected by a docs-only change.
 
 ## Pull Request
 
@@ -60,7 +91,8 @@ Other:
 
 ## Next Steps
 
-- Codex review of the branch against the task acceptance criteria.
+- **Operator action (unblocks the review's required fix):** merge the two-agent infrastructure to `main`, or rebase/retarget this docs branch onto a base that already contains it, so the docs PR diff shrinks to `README.md` + `.agent/handoff.md`. See "Revision Pass 20260622 (second — branch scope)" for the exact commit list.
+- Re-run Codex review against the narrowed diff; the docs content is already accepted, so the scope objection should clear once the infrastructure is no longer part of this diff.
 - Human PR review and merge (agents must not merge).
 - Optional: a reviewer with shell access runs the documented backend/frontend/Docker verification commands to confirm they pass as written.
 
@@ -133,3 +165,11 @@ Other:
 - Status: implemented_by_claude
 - Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
 - Log: .agent/logs/claude-implementer-20260622T035132Z.log
+
+## Script Update 20260622T035919Z
+
+- Current task: TASK-docs-setup-verification-audit
+- Current branch: agent/task-docs-setup-verification-audit
+- Status: implemented_by_claude
+- Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
+- Log: .agent/logs/claude-implementer-20260622T035919Z.log
