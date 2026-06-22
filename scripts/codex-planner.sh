@@ -102,6 +102,29 @@ else:
 PY
 }
 
+append_inbox_requests() {
+  append_section "Human Inbox Requests (Telegram /task and /goal)"
+
+  shopt -s nullglob
+  local inbox_files=(.agent/inbox/*.md)
+  shopt -u nullglob
+
+  if [ "${#inbox_files[@]}" -eq 0 ]; then
+    printf 'No human inbox requests pending.\n' >> "$context_path"
+    return
+  fi
+
+  printf 'These are direct human requests. Treat them as high-priority backlog input when proposing tasks.\n' >> "$context_path"
+
+  local path
+  for path in "${inbox_files[@]}"; do
+    printf '\n### `%s`\n\n' "$path" >> "$context_path"
+    printf '```text\n' >> "$context_path"
+    sed -n '1,120p' "$path" >> "$context_path"
+    printf '```\n' >> "$context_path"
+  done
+}
+
 append_recent_logs() {
   append_section "Recent Agent Logs"
 
@@ -165,6 +188,7 @@ append_file_if_present "AGENTS.md" "AGENTS.md"
 append_file_if_present ".agent/project_brief.md" ".agent/project_brief.md"
 append_file_if_present ".agent/operating_rules.md" ".agent/operating_rules.md"
 append_file_if_present ".agent/backlog.md" ".agent/backlog.md"
+append_inbox_requests
 append_file_if_present ".agent/handoff.md" ".agent/handoff.md"
 append_file_if_present "README.md" "README.md"
 append_file_if_present ".agent/schemas/task.schema.json" ".agent/schemas/task.schema.json"

@@ -699,10 +699,22 @@ drive_task_to_terminal_review() {
   done
 }
 
+loop_is_paused() {
+  [ -f .agent/state/paused ]
+}
+
 run_cycle() {
   local selection_status
   local task_id
   local task_status_code
+
+  if loop_is_paused; then
+    local pause_reason
+    pause_reason="$(sed -n '1p' .agent/state/paused 2>/dev/null || true)"
+    write_loop_event "loop_paused" "none" "${pause_reason:-Loop is paused.}"
+    printf 'Agent loop is paused (%s). Run /resume or remove .agent/state/paused to continue.\n' "${pause_reason:-no reason given}"
+    return 2
+  fi
 
   set -e
   scripts/agent-env-check.sh

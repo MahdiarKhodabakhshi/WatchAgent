@@ -22,3 +22,6 @@ frontend/dist/
 # Agent runtime inbox/state
 .agent/inbox/
 .agent/state/
+
+# Telegram bot secrets (keep the .example template tracked, ignore the real file)
+.agent/telegram.env

@@ -270,6 +270,64 @@ Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready
 
 GitHub issue creation is best-effort. If `gh` is authenticated and a remote exists, approval and review notifications can create or comment on issues labeled `agent/approval-needed` or `agent/review-needed`. GitHub is not required for success.
 
+## Telegram Control Channel
+
+`scripts/agent-telegram-bot.py` is an optional remote control surface. It
+long-polls the Telegram Bot API (`getUpdates`), so it needs no inbound port and
+no webhook. Only chat IDs in an explicit allowlist may issue commands; every
+other message is logged and ignored (fail closed). The bot uses the Python
+standard library only and never logs the bot token.
+
+Configure it by copying the template and filling in real values, or by exporting
+the variables in your shell. Environment variables take precedence over the file.
+
+```bash
+cp .agent/telegram.env.example .agent/telegram.env
+# edit .agent/telegram.env:
+#   TELEGRAM_BOT_TOKEN=...           (from @BotFather)
+#   TELEGRAM_ALLOWED_CHAT_IDS=...    (comma-separated; the bot refuses to start if empty)
+```
+
+`.agent/telegram.env` is gitignored. Do not commit real tokens.
+
+Find your chat ID (needed for the allowlist) by setting the token, messaging
+your bot, then running the bootstrap mode. It needs only the token, never runs
+commands, and does not advance the offset:
+
+```bash
+scripts/agent-telegram-bot.py --print-chat-ids
+```
+
+Put the printed chat ID in `TELEGRAM_ALLOWED_CHAT_IDS`, then run the bot in its
+own long-lived process:
+
+```bash
+scripts/agent-telegram-bot.py
+```
+
+The bot is a service: it must stay running for commands to be received. Nothing
+starts it automatically. Use `--once` to drain pending updates a single time
+(useful for testing).
+
+Supported commands:
+
+- `/status`: branch, loop pause state, actionable tasks, pending approvals, and pending inbox requests (via `scripts/agent-status.sh`).
+- `/approve TASK-ID`: approve a proposed task (`scripts/agent-approve.sh`). Append `--allow-high-risk` to approve a high-risk task.
+- `/reject TASK-ID reason`: reject a proposed or blocked task (`scripts/agent-reject.sh`); removes any pending approval request and writes a record under `.agent/approvals/rejected/`.
+- `/pause`: write `.agent/state/paused`. The loop checks this before each cycle and will not start new work until resumed.
+- `/resume`: remove `.agent/state/paused`.
+- `/task your request`: write a request into `.agent/inbox/` for the planner to consider.
+- `/goal your high-level direction`: write a high-level goal into `.agent/inbox/` for the planner to consider.
+- `/details TASK-ID`: print a task's title, status, risk, area, approver, and latest review.
+- `/help`: list the supported commands.
+
+The bot maps commands onto the same scripts a human runs locally; it adds no new
+ability to merge or push to protected branches. `/task` and `/goal` drop advisory
+markdown files into `.agent/inbox/`, which `scripts/codex-planner.sh` includes in
+the planner context on the next planning run. Both `.agent/inbox/` and
+`.agent/state/` are gitignored runtime directories; clear processed inbox files
+manually when they are no longer relevant.
+
 ## Human Final Integration
 
 Agents do not merge into protected branches. After a task is accepted, a human can inspect the work branch and manually merge or cherry-pick:
