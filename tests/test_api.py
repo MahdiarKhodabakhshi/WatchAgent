@@ -159,6 +159,70 @@ def test_limit_validation(client) -> None:
     assert response.status_code == 422
 
 
+def test_readings_reject_unknown_city(client) -> None:
+    response = client.get("/readings?city=Montreal")
+
+    assert response.status_code == 422
+
+
+def test_events_reject_unknown_city(client) -> None:
+    response = client.get("/events?city=Montreal")
+
+    assert response.status_code == 422
+
+
+def test_readings_reject_naive_start_datetime(client) -> None:
+    response = client.get("/readings?start=2026-05-27T13:00:00")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "start must be timezone-aware"
+
+
+def test_readings_reject_naive_end_datetime(client) -> None:
+    response = client.get("/readings?end=2026-05-27T13:00:00")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "end must be timezone-aware"
+
+
+def test_events_reject_naive_start_datetime(client) -> None:
+    response = client.get("/events?start=2026-05-27T13:00:00")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "start must be timezone-aware"
+
+
+def test_readings_reject_limit_below_minimum(client) -> None:
+    response = client.get("/readings?limit=0")
+
+    assert response.status_code == 422
+
+
+def test_events_limit_validation(client) -> None:
+    response = client.get("/events?limit=5001")
+
+    assert response.status_code == 422
+
+
+def test_readings_convert_timezone_aware_start_to_utc(client, db_session: Session) -> None:
+    for idx in range(4):
+        seed_reading(db_session, city="Toronto", hours_offset=idx)
+
+    # 18:00+05:00 is 13:00Z, so only the 13:00Z reading and later remain.
+    response = client.get(
+        "/readings",
+        params={"city": "Toronto", "start": "2026-05-27T18:00:00+05:00", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    readings = response.json()["readings"]
+    assert [reading["observation_ts"] for reading in readings] == [
+        "2026-05-27T15:00:00Z",
+        "2026-05-27T14:00:00Z",
+        "2026-05-27T13:00:00Z",
+    ]
+
+
 def test_forecasts_returns_documented_shape(client, db_session: Session) -> None:
     seed_forecast(db_session, city="Toronto", hours_offset=1, temperature_2m=21.5)
 

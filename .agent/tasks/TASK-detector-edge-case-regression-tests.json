@@ -1,0 +1,52 @@
+{
+  "acceptance_criteria": [
+    "New tests cover existing detector edge-case behavior without changing thresholds, scoring weights, severity mapping, lifecycle state transitions, or stored event contracts.",
+    "Tests are deterministic and do not depend on live Open-Meteo responses.",
+    "The added coverage uses existing test patterns and keeps fixtures minimal.",
+    "Any unexpected detector behavior is documented as a follow-up instead of being fixed within this task.",
+    "No evaluation metrics or README performance claims are changed."
+  ],
+  "approval_required": true,
+  "approved_by": "human",
+  "area": "backend-tests",
+  "context": "Detector logic is a risky area, but the backlog explicitly calls for identifying small low-risk tests. This task is limited to tests that document existing behavior. It must not tune thresholds, alter scoring, change severity mapping, or modify lifecycle behavior.",
+  "created_at": "2026-06-21T22:36:50Z",
+  "done_definition": [
+    "Focused detector regression tests are added without behavior changes.",
+    "Relevant detector tests pass or failures are documented with residual risk.",
+    "`.agent/handoff.md` records changed files, verification results, blockers, and any proposed follow-up."
+  ],
+  "files_likely_to_change": [
+    "tests/test_native_detectors.py",
+    "tests/test_detection_contract.py",
+    "tests/test_lifecycle.py",
+    ".agent/handoff.md"
+  ],
+  "forbidden_changes": [
+    "Do not modify detector thresholds, scoring weights, severity cutoffs, event lifecycle behavior, climatology artifacts, evaluation metrics, or README claims.",
+    "Do not modify secrets or print secret values.",
+    "Do not add live network calls, external services, paid API-key flows, auth, billing, notification integrations, deployment changes, or database migrations.",
+    "Do not delete or weaken existing tests."
+  ],
+  "implementation_plan": [
+    "Review existing detector tests, especially `tests/test_native_detectors.py`, `tests/test_detection_contract.py`, `tests/test_lifecycle.py`, and detector modules under `app/detection/`.",
+    "Select one or two narrowly scoped edge cases with clear current behavior, such as missing optional weather fields, borderline non-trigger cases, lifecycle hysteresis behavior, or confidence suppression with incomplete context.",
+    "Add tests using existing fixtures and helper patterns, keeping scenarios deterministic and network-free.",
+    "Do not change detector implementation unless a test exposes a clear bug already covered by an approved separate task; otherwise record a follow-up proposed task in `.agent/handoff.md`.",
+    "Run the smallest relevant detector test subset and document results."
+  ],
+  "objective": "Add focused regression tests for existing detector edge cases while preserving current thresholds, scoring, lifecycle behavior, and evaluation claims.",
+  "risk": "low",
+  "source": "codex-planner",
+  "status": "blocked",
+  "task_id": "TASK-detector-edge-case-regression-tests",
+  "test_plan": [
+    "Run the touched detector test file directly, such as `pytest tests/test_native_detectors.py` or the specific file modified.",
+    "Run adjacent detector contract/lifecycle tests if touched behavior crosses boundaries, such as `pytest tests/test_detection_contract.py tests/test_lifecycle.py`.",
+    "Record commands and results in `.agent/handoff.md`."
+  ],
+  "title": "Add detector edge-case regression tests without threshold changes",
+  "status_updated_at": "2026-06-22T14:02:26Z",
+  "status_reason": "The detector regression test additions appear aligned with the approved task, but the wrapper-provided fd8c8cb3af011d29934f4ed267331368deafb277..HEAD diff still includes extensive unrelated workflow, Telegram, systemd deployment, approval/task metadata, docs, and script changes. Because the handoff says this is a shared-branch/review-base problem that cannot be fixed within the detector-test task without a human/operator decision, the review is blocked.",
+  "last_review_file": ".agent/reviews/REVIEW-TASK-detector-edge-case-regression-tests-20260622T135752Z.json"
+}

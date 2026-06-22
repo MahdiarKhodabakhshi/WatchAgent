@@ -12,3 +12,17 @@ build/
 *.egg-info/
 frontend/node_modules/
 frontend/dist/
+
+# Local two-agent system runtime files
+.agent/logs/*.log
+.agent/notifications/*.md
+.agent/run-state/
+.agent/tmp/
+
+# Agent runtime inbox/state
+.agent/inbox/
+.agent/state/
+.agent/ideas/
+
+# Telegram bot secrets (keep the .example template tracked, ignore the real file)
+.agent/telegram.env
