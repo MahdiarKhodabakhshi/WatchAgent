@@ -1,18 +1,43 @@
 # Local Two-Agent Development System
 
-This repository uses a local, subscription-first autonomous loop:
+This repository uses a local, subscription-first autonomous workflow. The recommended portable model is a single autonomous work branch named `agent_developed`.
 
-1. The wrapper gathers repository context.
-2. Codex emits delta planner JSON only.
-3. The wrapper validates and materializes plans, new tasks, and missing approvals.
-4. If no actionable approved task exists, the wrapper can run the planner and then notifies the human when only proposed work remains.
-5. Claude Code implements exactly one actionable task.
-6. Claude or the wrapper opens or updates a draft PR when possible.
-7. Codex reviews the branch and writes structured review artifacts.
-8. The loop updates task state from the review verdict and automatically sends `needs_revision` work back to Claude within a bounded revision loop.
-9. In `--forever` mode, the loop sleeps and repeats.
+Agents work only on the configured work branch. `main` and `master` are protected human branches. Agents must never work on, push to, or merge into protected branches. A human reviews `agent_developed` later and manually merges or cherry-picks accepted work into `main` or `master`.
 
-Agents never push directly to `main` or `master`, never merge PRs, and never use API-key backed automation for this workflow.
+This avoids branch stacking and makes the system easier to port to other projects: one repository, one configured work branch, and task-specific review windows recorded in `.agent/run-state/`.
+
+## Branch Configuration
+
+Branch behavior is configured with `.agent/config.env` when present. The file is optional; these are the defaults:
+
+```bash
+AGENT_WORK_BRANCH=agent_developed
+AGENT_PROTECTED_BRANCHES=main,master
+AGENT_BRANCH_MODE=single_work_branch
+```
+
+The scripts load only simple `KEY=value` settings and do not print secret values. Keep this file non-secret.
+
+In `single_work_branch` mode:
+
+- Agents must already be on `AGENT_WORK_BRANCH`.
+- Agents may commit to `AGENT_WORK_BRANCH`.
+- Agents do not create per-task branches by default.
+- Agents do not switch branches during the loop.
+- Agents never push to `main`, `master`, or any branch listed in `AGENT_PROTECTED_BRANCHES`.
+- Agents never merge pull requests.
+
+Create or switch to the work branch manually:
+
+```bash
+git switch agent_developed
+```
+
+If the branch does not exist yet:
+
+```bash
+git switch -c agent_developed
+```
 
 ## Shared Files
 
@@ -20,6 +45,7 @@ Agents never push directly to `main` or `master`, never merge PRs, and never use
 - `.agent/operating_rules.md`: Contract both agents must follow.
 - `.agent/backlog.md`: Proposed and approved work queues.
 - `.agent/tasks/`: JSON task specs and loop-managed task state.
+- `.agent/run-state/`: Local runtime task base records, ignored by git.
 - `.agent/plans/`: Codex planner result notes.
 - `.agent/handoff.md`: Resumable current-state handoff.
 - `.agent/reviews/`: Markdown and JSON Codex review outputs.
@@ -36,17 +62,25 @@ Run:
 scripts/agent-env-check.sh
 ```
 
-The check verifies required CLIs, confirms the repo is a git repo, prints the current branch, warns on dirty worktrees, and fails closed if known Codex/OpenAI or Claude/Anthropic API-key variables are set. Use ChatGPT login for Codex and subscription OAuth for Claude Code.
+The check loads `.agent/config.env` if present, prints the current branch and configured work branch, verifies required CLIs, confirms the repo is a git repo, warns on dirty worktrees, and fails closed if known Codex/OpenAI or Claude/Anthropic API-key variables are set:
+
+- `OPENAI_API_KEY`
+- `CODEX_API_KEY`
+- `ANTHROPIC_API_KEY`
+
+`CLAUDE_CODE_OAUTH_TOKEN` is allowed. Use ChatGPT login for Codex and subscription OAuth for Claude Code.
+
+The check refuses to run on `main`, `master`, any branch in `AGENT_PROTECTED_BRANCHES`, or any branch other than `AGENT_WORK_BRANCH` in `single_work_branch` mode.
 
 ## One-Cycle Mode
 
-From a non-main branch:
+From `agent_developed`:
 
 ```bash
 scripts/agent-loop.sh
 ```
 
-The default runs one complete task cycle: select one actionable task, implement it, open or update a draft PR, review it, and keep sending that same task back to Claude while Codex returns `needs_revision`, up to the revision limit. It then updates task state, checkpoints, and stops. It refuses to run on `main` or `master`.
+The default runs one complete task cycle: select one actionable task, record the task base commit, implement it, review it, and keep sending that same task back to Claude while Codex returns `needs_revision`, up to the revision limit. It then updates task state, checkpoints, and stops.
 
 `--once` is an explicit alias for the default one-cycle behavior:
 
@@ -54,7 +88,13 @@ The default runs one complete task cycle: select one actionable task, implement 
 scripts/agent-loop.sh --once
 ```
 
-Task selection happens before planning. The loop picks the first actionable task in deterministic priority order: `needs_revision`, then `in_progress`, then `approved`. If no actionable task exists, it runs the planner unless `--skip-planner` is passed. If the planner creates only proposed tasks, the loop writes an `approval_needed` notification and stops in one-cycle mode.
+Task selection happens before planning. The loop picks the first actionable task in deterministic priority order:
+
+1. `needs_revision`
+2. `in_progress`
+3. `approved`
+
+If no actionable task exists, it runs the planner unless `--skip-planner` is passed. If the planner creates only proposed tasks, the loop writes an `approval_needed` notification and stops.
 
 Use `--skip-planner` when you only want to continue existing approved or revision work:
 
@@ -67,6 +107,32 @@ The revision limit defaults to 3 Claude revision passes after review feedback:
 ```bash
 scripts/agent-loop.sh --max-revisions-per-task 2
 ```
+
+## Task Base Run State
+
+Before Claude changes a selected task, the loop records the current `HEAD` in:
+
+```text
+.agent/run-state/<TASK-ID>.json
+```
+
+Each run-state file contains:
+
+- `task_id`
+- `branch`
+- `task_start_commit`
+- `started_at`
+- `mode: single_work_branch`
+
+If run-state already exists for the task, the loop reuses the same `task_start_commit`. This lets review focus only on the current task even when older accepted or pending work already exists on `agent_developed`.
+
+Reset the selected task base to the current `HEAD` only after manually confirming that older work should be excluded from the next review:
+
+```bash
+scripts/agent-loop.sh --reset-task-base
+```
+
+`--reset-task-base` is valid only in `single_work_branch` mode on the current work branch.
 
 ## Forever Mode
 
@@ -100,12 +166,6 @@ High-risk tasks require explicit approval:
 scripts/agent-approve.sh --allow-high-risk TASK-ID
 ```
 
-If no actionable task exists, the loop writes a notification and prints:
-
-```text
-No approved tasks. Review .agent/approvals/pending/ and approve one with scripts/agent-approve.sh TASK-ID.
-```
-
 Proposed tasks still require human approval before Claude may implement them.
 
 ## Task Status Lifecycle
@@ -116,7 +176,7 @@ Allowed task statuses:
 - `approved`: Human approved and eligible for implementation.
 - `in_progress`: Selected by the implementer.
 - `needs_revision`: Codex review found required fixes inside the original approved scope; Claude may fix these without new approval if the fix stays in that scope.
-- `implemented`: Codex review accepted the implementation; human PR review and merge are still required.
+- `implemented`: Codex review accepted the implementation; human final review and merge/cherry-pick are still required.
 - `blocked`: Human decision or external access is needed.
 - `rejected`: Human rejected the proposed task.
 
@@ -140,9 +200,7 @@ scripts/codex-planner.sh
 
 The wrapper gathers context into `.agent/tmp/planner-context.md`, asks Codex for JSON only, validates the output, and materializes files through `scripts/materialize-planner-output.py`. Existing task files are not overwritten.
 
-Planner output is delta-based. Codex should emit full task objects only for new tasks, while `recommended_order` may reference task IDs that already exist in `.agent/tasks/`. If no new tasks are needed, the planner returns `"tasks": []` and keeps any still-relevant existing task IDs in `recommended_order`.
-
-The materializer validates `recommended_order` against both task IDs in the current planner output and existing `.agent/tasks/*.json` files, ignoring `TASK-TEMPLATE.json`. Existing task files are not overwritten. For existing `proposed` tasks, the materializer only creates a missing pending approval file; proposed tasks still require human approval before implementation. Existing `approved`, `in_progress`, `needs_revision`, `implemented`, and `blocked` tasks are not regenerated.
+Planner output is delta-based. Codex should emit full task objects only for new tasks, while `recommended_order` may reference task IDs that already exist in `.agent/tasks/`. Proposed tasks require human approval before implementation.
 
 ## Implementer Behavior
 
@@ -158,7 +216,7 @@ Or pass an explicit task id:
 scripts/claude-implementer.sh TASK-ID
 ```
 
-For an `approved` task, the script marks it `in_progress`, switches to `agent/<task-id-slug>`, runs Claude Code with subscription auth, asks Claude to update `.agent/handoff.md`, commits implementation changes when possible, pushes the task branch, and opens or updates a draft PR when `gh` can do so.
+In `single_work_branch` mode, the implementer verifies the current branch is `AGENT_WORK_BRANCH`, verifies it is not protected, does not create or switch branches, records or reuses `.agent/run-state/<TASK-ID>.json`, runs Claude Code with subscription auth, asks Claude to update `.agent/handoff.md`, commits implementation changes when possible, and may push or open a draft PR from the work branch when possible.
 
 For a `needs_revision` task, the prompt tells Claude to read the latest `.agent/reviews/REVIEW-<TASK-ID>-*.json` and fix only `required_fixes` within the original approved task scope. It does not create a new task or ask for new approval for in-scope review fixes.
 
@@ -172,18 +230,30 @@ Run the reviewer after implementation:
 scripts/codex-reviewer.sh TASK-ID
 ```
 
-The reviewer runs Codex in read-only mode and writes:
+In `single_work_branch` mode, the reviewer reads `.agent/run-state/<TASK-ID>.json` and reviews only:
+
+```text
+git diff <task_start_commit>..HEAD
+```
+
+It does not review `main...HEAD` or any setup branch diff. Older work already present on `AGENT_WORK_BRANCH` before `task_start_commit` is ignored for this task review.
+
+The wrapper provides Codex with the current branch, configured work branch, branch mode, `task_start_commit`, current `HEAD`, git status, diff stat, full diff, task JSON, and `.agent/handoff.md` content. Codex is instructed not to run shell, Bash, git, gh, or file-inspection commands and to emit structured review JSON only.
+
+The reviewer writes:
 
 - `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.json`
 - `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.md`
 
-The JSON verdict is one of:
+The JSON verdict is exactly one of:
 
-- `accepted`: loop marks the task `implemented`, writes a completion note, and notifies the human that the PR is ready.
+- `accepted`: loop marks the task `implemented`, writes a completion note, and notifies the human that final review and merge/cherry-pick are required.
 - `needs_revision`: loop marks the same task `needs_revision`; the same one-cycle run sends it back to Claude without new approval if fixes stay in scope, until the review is accepted, blocked, or `--max-revisions-per-task` is reached.
 - `blocked`: loop marks the task `blocked` and notifies the human.
 
-Accepted does not mean merged. Humans still review and merge PRs.
+If run-state is missing or invalid, or the wrapper cannot gather the task diff, the reviewer writes a blocked review artifact instead of falling back to `main...HEAD` or a setup branch diff.
+
+Accepted does not mean merged. Humans still review and merge/cherry-pick to protected branches.
 
 ## Notifications
 
@@ -194,15 +264,27 @@ scripts/agent-notify.sh approval_needed
 scripts/agent-notify.sh review_ready TASK-ID
 ```
 
-Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready`, `auth_failed`, `usage_limit`, `loop_failed`, and `max_revisions_reached`. Each notification includes the reason, timestamp, branch, current actionable task, pending approvals, and the next command for the human.
+Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready`, `auth_failed`, `usage_limit`, `loop_failed`, and `max_revisions_reached`. Each notification includes the current work branch, task id, task status, whether human approval is needed, whether human final review/merge is needed, pending approvals, and the next command for the human.
 
 GitHub issue creation is best-effort. If `gh` is authenticated and a remote exists, approval and review notifications can create or comment on issues labeled `agent/approval-needed` or `agent/review-needed`. GitHub is not required for success.
 
-## PR Behavior
+## Human Final Integration
 
-Implementation branches are named `agent/<task-id-slug>`. PRs created by agents are draft PRs unless a human says otherwise. Agents never merge PRs and never push directly to `main` or `master`.
+Agents do not merge into protected branches. After a task is accepted, a human can inspect the work branch and manually merge or cherry-pick:
 
-If `gh` cannot create a PR, the implementer records that in `.agent/handoff.md` and continues after preserving local changes.
+```bash
+git switch main
+git merge --no-ff agent_developed
+```
+
+Or cherry-pick specific commits:
+
+```bash
+git switch main
+git cherry-pick <commit>
+```
+
+Use the repository's normal human review process before either operation.
 
 ## Recovery
 
@@ -211,7 +293,7 @@ For Claude auth errors:
 1. Inspect `.agent/handoff.md` and the latest `.agent/logs/claude-implementer-*.log`.
 2. Re-authenticate Claude Code with subscription OAuth.
 3. Confirm API-key environment variables are unset.
-4. Re-run `scripts/agent-loop.sh` or `scripts/claude-implementer.sh TASK-ID`.
+4. Re-run `scripts/agent-loop.sh` or `scripts/claude-implementer.sh TASK-ID` from `AGENT_WORK_BRANCH`.
 
 For usage, auth, or max-turn stops:
 
@@ -219,7 +301,9 @@ For usage, auth, or max-turn stops:
 2. Re-authenticate when needed, wait for usage to reset, or increase `CLAUDE_MAX_TURNS` for a scoped retry.
 3. Resume the same task with `scripts/agent-loop.sh`.
 
-For planner failures, inspect `.agent/logs/agent-loop-events.log` and the latest Codex planner log. Already-actionable approved, in-progress, or revision work can still continue through the loop because task selection happens before planning. For reviewer or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause.
+For planner failures, inspect `.agent/logs/agent-loop-events.log` and the latest Codex planner log. Already-actionable approved, in-progress, or revision work can still continue through the loop because task selection happens before planning.
+
+For reviewer or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause. For missing or wrong task bases, rerun with `--reset-task-base` only after confirming the current `HEAD` should be the new review base.
 
 For max revision stops, inspect the latest review JSON and `.agent/handoff.md`. The task is marked `blocked`; a human can manually intervene or approve a new scoped task.
 

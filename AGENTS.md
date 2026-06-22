@@ -8,7 +8,7 @@ This repository uses a local, subscription-first two-agent workflow. The repo is
 
 - Codex is the Planner / Product + Architecture + Security Analyst.
 - Claude Code is the Implementer / Engineer.
-- Codex may propose tasks, create plans, and review PRs.
+- Codex may propose tasks, create plans, and review work branch diffs or PRs.
 - Codex must not implement application code unless a human explicitly asks for implementation in the current session.
 - Claude may only implement tasks that are already approved in `.agent/tasks/`.
 
@@ -24,8 +24,14 @@ This repository uses a local, subscription-first two-agent workflow. The repo is
 ### Branch Rules
 
 - Agents must never push directly to `main` or `master`.
+- Agents must never work on `main` or `master`.
+- Agents must never push to branches listed in `AGENT_PROTECTED_BRANCHES`.
 - Agents must never merge pull requests.
-- Implementation work must happen on a task branch named `agent/<task-id-slug>`.
+- The recommended portable branch mode is `single_work_branch`.
+- In `single_work_branch` mode, implementation work must happen on `AGENT_WORK_BRANCH` (default: `agent_developed`).
+- In `single_work_branch` mode, agents must not create per-task branches by default.
+- Agents may commit to `AGENT_WORK_BRANCH`.
+- Human review is required before any final merge or cherry-pick to `main` or `master`.
 - One implementation run should handle exactly one approved task.
 - Pull requests created by agents must be draft PRs unless a human says otherwise.
 
@@ -60,8 +66,9 @@ This repository uses a local, subscription-first two-agent workflow. The repo is
 
 - Proposed tasks require human approval before implementation.
 - Tasks with status `needs_revision` may be fixed without reapproval only when the fix stays within the original approved task scope.
-- A task marked `implemented` still requires human PR review and merge.
+- A task marked `implemented` still requires human final review and merge/cherry-pick.
 - Agents must not auto-merge PRs.
+- Human operators are responsible for final review and merge/cherry-pick from `AGENT_WORK_BRANCH` to protected branches.
 - Codex review verdicts drive final loop state: `accepted`, `needs_revision`, or `blocked`.
 
 ### Subscription-Only Rule

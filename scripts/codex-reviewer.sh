@@ -17,51 +17,125 @@ require_python() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to find and validate task JSON files."
 }
 
-find_task_by_id_or_branch() {
-  local requested="${1-}"
-  local branch_name
-  branch_name="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')"
-  python3 - "$requested" "$branch_name" <<'PY'
+load_agent_config() {
+  AGENT_WORK_BRANCH="${AGENT_WORK_BRANCH:-agent_developed}"
+  AGENT_PROTECTED_BRANCHES="${AGENT_PROTECTED_BRANCHES:-main,master}"
+  AGENT_BRANCH_MODE="${AGENT_BRANCH_MODE:-single_work_branch}"
+
+  local config_file=".agent/config.env"
+  local line key value
+  if [ -f "$config_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|\#*)
+          continue
+          ;;
+      esac
+      case "$line" in
+        AGENT_WORK_BRANCH=*|AGENT_PROTECTED_BRANCHES=*|AGENT_BRANCH_MODE=*)
+          key="${line%%=*}"
+          value="${line#*=}"
+          ;;
+        *)
+          fail "Unsupported config line in $config_file. Use simple KEY=value entries only."
+          ;;
+      esac
+      case "$value" in
+        \"*\")
+          value="${value#\"}"
+          value="${value%\"}"
+          ;;
+        \'*\')
+          value="${value#\'}"
+          value="${value%\'}"
+          ;;
+      esac
+      case "$key" in
+        AGENT_WORK_BRANCH)
+          AGENT_WORK_BRANCH="$value"
+          ;;
+        AGENT_PROTECTED_BRANCHES)
+          AGENT_PROTECTED_BRANCHES="$value"
+          ;;
+        AGENT_BRANCH_MODE)
+          AGENT_BRANCH_MODE="$value"
+          ;;
+      esac
+    done < "$config_file"
+  fi
+
+  [[ "$AGENT_WORK_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "AGENT_WORK_BRANCH must be a non-empty git branch name using safe characters."
+  [[ "$AGENT_PROTECTED_BRANCHES" =~ ^[A-Za-z0-9._/,-]+$ ]] || fail "AGENT_PROTECTED_BRANCHES must be a comma-separated branch list using safe characters."
+  [[ "$AGENT_BRANCH_MODE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "AGENT_BRANCH_MODE must use safe characters."
+}
+
+branch_is_protected() {
+  local branch="$1"
+  local protected
+  local old_ifs="$IFS"
+  IFS=,
+  for protected in $AGENT_PROTECTED_BRANCHES; do
+    protected="$(printf '%s' "$protected" | tr -d '[:space:]')"
+    if [ "$branch" = "$protected" ]; then
+      IFS="$old_ifs"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
+verify_agent_work_branch() {
+  local branch="$1"
+
+  case "$branch" in
+    main|master)
+      fail "Refusing to review on protected human branch $branch."
+      ;;
+  esac
+
+  if branch_is_protected "$branch"; then
+    fail "Refusing to review on protected branch $branch."
+  fi
+
+  case "$AGENT_BRANCH_MODE" in
+    single_work_branch)
+      if [ "$branch" != "$AGENT_WORK_BRANCH" ]; then
+        fail "Refusing to review in single_work_branch mode from $branch. Switch to $AGENT_WORK_BRANCH first."
+      fi
+      ;;
+    *)
+      fail "Unsupported AGENT_BRANCH_MODE: $AGENT_BRANCH_MODE"
+      ;;
+  esac
+}
+
+find_task_by_id() {
+  local requested="$1"
+  python3 - "$requested" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
 requested = sys.argv[1]
-branch_name = sys.argv[2]
+if not re.fullmatch(r"TASK-[A-Za-z0-9._-]+", requested):
+    raise SystemExit(1)
+if requested == "TASK-TEMPLATE":
+    raise SystemExit(1)
 
-
-def slugify(value: str) -> str:
-    value = value.lower()
-    value = re.sub(r"[^a-z0-9._-]", "-", value)
-    value = re.sub(r"-+", "-", value)
-    return value.strip("-")
-
-
-branch_slug = ""
-if branch_name.startswith("agent/"):
-    branch_slug = branch_name.split("/", 1)[1]
-
-matches = []
-for path in pathlib.Path(".agent/tasks").glob("*.json"):
-    if path.name == "TASK-TEMPLATE.json" or path.is_symlink():
-        continue
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    task_id = data.get("task_id", "")
-    if requested and task_id == requested:
-        print(path)
-        sys.exit(0)
-    if not requested and branch_slug and slugify(task_id) == branch_slug:
-        matches.append(path)
-
-if matches:
-    print(matches[0])
-    sys.exit(0)
-
-sys.exit(1)
+task_dir = pathlib.Path(".agent/tasks")
+path = task_dir / f"{requested}.json"
+if path.parent != task_dir or path.is_symlink():
+    raise SystemExit(1)
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+if data.get("task_id") != requested:
+    raise SystemExit(1)
+print(path)
 PY
 }
 
@@ -185,6 +259,88 @@ markdown_path.write_text("\n".join(lines), encoding="utf-8")
 PY
 }
 
+write_blocked_review() {
+  local task_id="$1"
+  local json_path="$2"
+  local markdown_path="$3"
+  local summary="$4"
+  local required_fix="$5"
+
+  python3 - "$task_id" "$json_path" "$summary" "$required_fix" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+task_id, json_path, summary, required_fix = sys.argv[1:5]
+data = {
+    "task_id": task_id,
+    "verdict": "blocked",
+    "summary": summary,
+    "scope_check": "Blocked before scope review because the wrapper could not establish the task-specific diff.",
+    "tests_check": "Blocked before test review because no reliable task diff was available.",
+    "docs_check": "Blocked before docs review because no reliable task diff was available.",
+    "security_check": "Blocked before security review because no reliable task diff was available.",
+    "required_fixes": [required_fix],
+    "recommended_followups": [],
+}
+Path(json_path).write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+PY
+  render_markdown_review "$json_path" "$markdown_path" "$task_id"
+}
+
+read_run_state() {
+  local task_id="$1"
+  python3 - "$task_id" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+task_id = sys.argv[1]
+if not re.fullmatch(r"TASK-[A-Za-z0-9._-]+", task_id):
+    print(f"Unsafe or invalid task id: {task_id!r}", file=sys.stderr)
+    raise SystemExit(1)
+
+run_state_dir = Path(".agent/run-state")
+path = run_state_dir / f"{task_id}.json"
+if path.parent != run_state_dir:
+    print(f"Refusing unsafe run-state path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if run_state_dir.is_symlink():
+    print("Refusing to read symlinked .agent/run-state directory.", file=sys.stderr)
+    raise SystemExit(1)
+if not path.exists():
+    print(f"Missing run-state file: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if path.is_symlink():
+    print(f"Refusing symlinked run-state file: {path}", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"Run-state is invalid JSON: {path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+task_start_commit = data.get("task_start_commit")
+branch = data.get("branch")
+mode = data.get("mode")
+if data.get("task_id") != task_id:
+    print(f"Run-state task_id mismatch in {path}.", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(branch, str) or not branch:
+    print(f"Run-state is missing branch: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(task_start_commit, str) or not task_start_commit:
+    print(f"Run-state is missing task_start_commit: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if mode != "single_work_branch":
+    print(f"Run-state mode must be single_work_branch: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"{branch}\t{task_start_commit}\t{mode}")
+PY
+}
+
 classify_codex_failure() {
   if grep -Eiq 'auth|oauth|login|not authenticated|not logged in|unauthorized|forbidden' "$log_path"; then
     printf 'auth_failed\n'
@@ -200,18 +356,22 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 
+load_agent_config
 scripts/agent-env-check.sh
 require_python
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
-case "$branch" in
-  main|master)
-    fail "Refusing to review on $branch. Review an implementation branch instead."
-    ;;
-esac
+verify_agent_work_branch "$branch"
 
-if ! task_file="$(find_task_by_id_or_branch "${1-}")"; then
-  fail "Could not infer task file. Pass TASK-ID explicitly, or run from an agent/<task-id-slug> branch."
+requested_task_id="${1-}"
+if [ -z "$requested_task_id" ]; then
+  if ! requested_task_id="$(scripts/agent-task-state.py get-next)"; then
+    fail "Could not infer task file. Pass TASK-ID explicitly."
+  fi
+fi
+
+if ! task_file="$(find_task_by_id "$requested_task_id")"; then
+  fail "Could not find valid task file for $requested_task_id."
 fi
 
 task_id="$(json_field "$task_file" task_id)"
@@ -224,21 +384,108 @@ review_json_path=".agent/reviews/REVIEW-${task_id}-${timestamp}.json"
 prompt_path=".agent/tmp/review-prompt-${task_id}-${timestamp}.md"
 log_path=".agent/logs/codex-reviewer-${timestamp}.log"
 
+case "$AGENT_BRANCH_MODE" in
+  single_work_branch)
+    if ! run_state_line="$(read_run_state "$task_id" 2>&1)"; then
+      write_blocked_review \
+        "$task_id" \
+        "$review_json_path" \
+        "$review_md_path" \
+        "Missing or invalid run-state for ${task_id}; task_start_commit is required for single_work_branch review." \
+        "Run scripts/agent-loop.sh for this task to create .agent/run-state/${task_id}.json, or rerun with --reset-task-base after manually confirming the current HEAD should be the new task base. Detail: ${run_state_line}"
+      printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
+      exit 0
+    fi
+    IFS=$'\t' read -r run_state_branch task_start_commit run_state_mode <<< "$run_state_line"
+    if [ "$run_state_branch" != "$branch" ]; then
+      write_blocked_review \
+        "$task_id" \
+        "$review_json_path" \
+        "$review_md_path" \
+        "Run-state branch ${run_state_branch} does not match current branch ${branch}." \
+        "Switch to ${run_state_branch} or reset the task base on ${branch} with scripts/agent-loop.sh --reset-task-base after confirming the current HEAD should be the new task base."
+      printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
+      exit 0
+    fi
+    ;;
+  *)
+    fail "Unsupported AGENT_BRANCH_MODE: $AGENT_BRANCH_MODE"
+    ;;
+esac
+
+current_head="$(git rev-parse HEAD)"
+if ! git rev-parse --verify "${task_start_commit}^{commit}" >/dev/null 2>&1; then
+  write_blocked_review \
+    "$task_id" \
+    "$review_json_path" \
+    "$review_md_path" \
+    "task_start_commit ${task_start_commit} is not a valid commit in this repository." \
+    "Repair .agent/run-state/${task_id}.json or rerun scripts/agent-loop.sh --reset-task-base after manually confirming the current HEAD should be the new task base."
+  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
+  exit 0
+fi
+
+if ! git_status="$(git status --short --branch 2>&1)"; then
+  write_blocked_review \
+    "$task_id" \
+    "$review_json_path" \
+    "$review_md_path" \
+    "Wrapper could not gather git status for ${task_id}." \
+    "Fix git status collection before rerunning review. Detail: ${git_status}"
+  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
+  exit 0
+fi
+if ! diff_stat="$(git diff --stat "${task_start_commit}..HEAD" 2>&1)"; then
+  write_blocked_review \
+    "$task_id" \
+    "$review_json_path" \
+    "$review_md_path" \
+    "Wrapper could not gather git diff --stat for ${task_id} from task_start_commit to HEAD." \
+    "Fix the task_start_commit or repository state before rerunning review. Detail: ${diff_stat}"
+  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
+  exit 0
+fi
+if ! git_diff="$(git diff "${task_start_commit}..HEAD" 2>&1)"; then
+  write_blocked_review \
+    "$task_id" \
+    "$review_json_path" \
+    "$review_md_path" \
+    "Wrapper could not gather git diff for ${task_id} from task_start_commit to HEAD." \
+    "Fix the task_start_commit or repository state before rerunning review. Detail: ${git_diff}"
+  printf 'Codex reviewer blocked before Codex run. Review: %s JSON: %s\n' "$review_md_path" "$review_json_path"
+  exit 0
+fi
+
+task_json="$(cat "$task_file")"
+if [ -f .agent/handoff.md ]; then
+  handoff_content="$(cat .agent/handoff.md)"
+else
+  handoff_content="No .agent/handoff.md present."
+fi
+
 {
   cat <<PROMPT
 You are Codex acting only as Reviewer for this repository.
 
-Review the current branch against this approved task:
+Review the wrapper-provided task diff against this approved task:
 - Task file: ${task_file}
 - Task ID: ${task_id}
 
-Read:
-- AGENTS.md
-- .agent/operating_rules.md
-- .agent/handoff.md
-- ${task_file}
+Branch context:
+- Current branch: ${branch}
+- Configured work branch: ${AGENT_WORK_BRANCH}
+- Branch mode: ${AGENT_BRANCH_MODE}
+- task_start_commit: ${task_start_commit}
+- Current HEAD: ${current_head}
 
-Use read-only commands only. If gh is authenticated and a PR exists for this branch, inspect it for context. Do not edit files.
+Review only the diff from task_start_commit to HEAD. Ignore older work already present on the work branch before task_start_commit.
+
+Do not review main...HEAD.
+Do not review setup branch...HEAD.
+Do not treat older work already on ${AGENT_WORK_BRANCH} before task_start_commit as part of this task.
+Codex must not run shell commands.
+Codex must not run Bash, git, gh, or file-inspection commands.
+Codex must emit structured review JSON only.
 
 Return a single JSON object only. It must match .agent/schemas/review.schema.json exactly:
 {
@@ -259,9 +506,39 @@ Reviewer rules:
 - Check acceptance criteria, tests, docs, security, architecture, and scope.
 - If implementation is incomplete but fixable within the original approved scope, use verdict "needs_revision".
 - If the task needs a human decision, use verdict "blocked".
-- If accepted, do not merge; human still reviews and merges the PR.
+- If accepted, do not merge; human still reviews and merges/cherry-picks to main or master.
 - Put blocking required changes in required_fixes. Include file and line references when available.
 - Use recommended_followups only for non-blocking work that should not expand the approved task.
+
+## Git Status
+
+```text
+${git_status}
+```
+
+## Diff Stat (${task_start_commit}..HEAD)
+
+```text
+${diff_stat}
+```
+
+## Task JSON
+
+```json
+${task_json}
+```
+
+## Handoff
+
+```markdown
+${handoff_content}
+```
+
+## Git Diff (${task_start_commit}..HEAD)
+
+```diff
+${git_diff}
+```
 PROMPT
 } > "$prompt_path"
 

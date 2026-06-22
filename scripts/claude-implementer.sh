@@ -17,6 +17,100 @@ require_python() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to read and update task JSON files."
 }
 
+load_agent_config() {
+  AGENT_WORK_BRANCH="${AGENT_WORK_BRANCH:-agent_developed}"
+  AGENT_PROTECTED_BRANCHES="${AGENT_PROTECTED_BRANCHES:-main,master}"
+  AGENT_BRANCH_MODE="${AGENT_BRANCH_MODE:-single_work_branch}"
+
+  local config_file=".agent/config.env"
+  local line key value
+  if [ -f "$config_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|\#*)
+          continue
+          ;;
+      esac
+      case "$line" in
+        AGENT_WORK_BRANCH=*|AGENT_PROTECTED_BRANCHES=*|AGENT_BRANCH_MODE=*)
+          key="${line%%=*}"
+          value="${line#*=}"
+          ;;
+        *)
+          fail "Unsupported config line in $config_file. Use simple KEY=value entries only."
+          ;;
+      esac
+      case "$value" in
+        \"*\")
+          value="${value#\"}"
+          value="${value%\"}"
+          ;;
+        \'*\')
+          value="${value#\'}"
+          value="${value%\'}"
+          ;;
+      esac
+      case "$key" in
+        AGENT_WORK_BRANCH)
+          AGENT_WORK_BRANCH="$value"
+          ;;
+        AGENT_PROTECTED_BRANCHES)
+          AGENT_PROTECTED_BRANCHES="$value"
+          ;;
+        AGENT_BRANCH_MODE)
+          AGENT_BRANCH_MODE="$value"
+          ;;
+      esac
+    done < "$config_file"
+  fi
+
+  [[ "$AGENT_WORK_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "AGENT_WORK_BRANCH must be a non-empty git branch name using safe characters."
+  [[ "$AGENT_PROTECTED_BRANCHES" =~ ^[A-Za-z0-9._/,-]+$ ]] || fail "AGENT_PROTECTED_BRANCHES must be a comma-separated branch list using safe characters."
+  [[ "$AGENT_BRANCH_MODE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "AGENT_BRANCH_MODE must use safe characters."
+}
+
+branch_is_protected() {
+  local branch="$1"
+  local protected
+  local old_ifs="$IFS"
+  IFS=,
+  for protected in $AGENT_PROTECTED_BRANCHES; do
+    protected="$(printf '%s' "$protected" | tr -d '[:space:]')"
+    if [ "$branch" = "$protected" ]; then
+      IFS="$old_ifs"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
+verify_agent_work_branch() {
+  local branch="$1"
+
+  case "$branch" in
+    main|master)
+      fail "Refusing to run Claude implementer on protected human branch $branch."
+      ;;
+  esac
+
+  if branch_is_protected "$branch"; then
+    fail "Refusing to run Claude implementer on protected branch $branch."
+  fi
+
+  case "$AGENT_BRANCH_MODE" in
+    single_work_branch)
+      if [ "$branch" != "$AGENT_WORK_BRANCH" ]; then
+        fail "Refusing to run in single_work_branch mode from $branch. Switch to $AGENT_WORK_BRANCH first."
+      fi
+      ;;
+    *)
+      fail "Unsupported AGENT_BRANCH_MODE: $AGENT_BRANCH_MODE"
+      ;;
+  esac
+}
+
 json_field() {
   local path="$1"
   local field="$2"
@@ -49,8 +143,76 @@ if task_id == "TASK-TEMPLATE":
 PY
 }
 
-slugify() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//'
+ensure_task_run_state() {
+  local task_id="$1"
+  local branch
+  local head
+
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  head="$(git rev-parse HEAD)"
+  mkdir -p .agent/run-state
+
+  python3 - "$task_id" "$branch" "$head" "$AGENT_BRANCH_MODE" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+task_id, branch, head, mode = sys.argv[1:5]
+if not re.fullmatch(r"TASK-[A-Za-z0-9._-]+", task_id):
+    print(f"ERROR: Unsafe or invalid task id for run-state: {task_id!r}", file=sys.stderr)
+    raise SystemExit(1)
+if mode != "single_work_branch":
+    print(f"ERROR: Unsupported run-state mode: {mode}", file=sys.stderr)
+    raise SystemExit(1)
+
+run_state_dir = Path(".agent/run-state")
+if run_state_dir.is_symlink():
+    print("ERROR: Refusing to write run-state through symlinked .agent/run-state.", file=sys.stderr)
+    raise SystemExit(1)
+run_state_dir.mkdir(parents=True, exist_ok=True)
+path = run_state_dir / f"{task_id}.json"
+if path.parent != run_state_dir:
+    print(f"ERROR: Refusing unsafe run-state path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if path.exists() and path.is_symlink():
+    print(f"ERROR: Refusing symlinked run-state file: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+if path.exists():
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"ERROR: Existing run-state is invalid JSON: {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if data.get("task_id") != task_id:
+        print(f"ERROR: Run-state task_id mismatch in {path}.", file=sys.stderr)
+        raise SystemExit(1)
+    if data.get("mode") != mode:
+        print(f"ERROR: Run-state mode mismatch in {path}.", file=sys.stderr)
+        raise SystemExit(1)
+    if data.get("branch") != branch:
+        print(f"ERROR: Run-state branch {data.get('branch')!r} does not match current branch {branch!r}.", file=sys.stderr)
+        raise SystemExit(1)
+    task_start_commit = data.get("task_start_commit")
+    if not isinstance(task_start_commit, str) or not task_start_commit:
+        print(f"ERROR: Run-state is missing task_start_commit: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    print(task_start_commit)
+    raise SystemExit(0)
+
+data = {
+    "task_id": task_id,
+    "branch": branch,
+    "task_start_commit": head,
+    "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "mode": mode,
+}
+path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+print(head)
+PY
 }
 
 append_handoff_update() {
@@ -60,6 +222,8 @@ append_handoff_update() {
     printf '\n## Script Update %s\n\n' "$timestamp"
     printf '%s\n' "- Current task: $task_id"
     printf '%s\n' "- Current branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
+    printf '%s\n' "- Configured work branch: $AGENT_WORK_BRANCH"
+    printf '%s\n' "- Branch mode: $AGENT_BRANCH_MODE"
     printf '%s\n' "- Status: $status"
     printf '%s\n' "- Note: $note"
     printf '%s\n' "- Log: $log_path"
@@ -86,21 +250,30 @@ push_and_open_draft_pr() {
   local remote_name
   local base_branch
 
+  case "$branch_name" in
+    main|master)
+      fail "Refusing to push protected branch $branch_name."
+      ;;
+  esac
+  if branch_is_protected "$branch_name"; then
+    fail "Refusing to push protected branch $branch_name."
+  fi
+
   remote_name="$(git remote | sed -n '1p')"
   if [ -z "$remote_name" ]; then
-    append_handoff_update "pr_pending" "No git remote configured; draft PR creation was skipped."
-    printf 'No git remote configured; skipping push and draft PR creation.\n'
+    append_handoff_update "review_pending" "No git remote configured; work remains on ${branch_name} for human review and merge/cherry-pick."
+    printf 'No git remote configured; leaving work on %s for human review.\n' "$branch_name"
     return 0
   fi
 
   if ! git push -u "$remote_name" "$branch_name"; then
-    append_handoff_update "pr_pending" "git push failed; draft PR creation was skipped."
+    append_handoff_update "review_pending" "git push of ${branch_name} failed; human review must use the local work branch."
     printf 'WARN: git push failed; skipping draft PR creation.\n' >&2
     return 0
   fi
 
   if ! gh auth status >/dev/null 2>&1; then
-    append_handoff_update "pr_pending" "gh is not authenticated; draft PR creation was skipped."
+    append_handoff_update "review_pending" "gh is not authenticated; review ${branch_name} manually or create a draft PR yourself."
     printf 'gh is installed but not authenticated; skipping draft PR creation.\n'
     return 0
   fi
@@ -126,7 +299,7 @@ push_and_open_draft_pr() {
     --fill \
     --base "$base_branch" \
     --head "$branch_name"; then
-    append_handoff_update "pr_pending" "gh pr create failed; implementation changes are preserved on the branch."
+    append_handoff_update "review_pending" "gh pr create failed; implementation changes are preserved on ${branch_name}."
     printf 'WARN: gh pr create failed.\n' >&2
   fi
 }
@@ -148,15 +321,12 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 
+load_agent_config
 scripts/agent-env-check.sh
 require_python
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
-case "$current_branch" in
-  main|master)
-    fail "Refusing to run Claude implementer on $current_branch. Create or switch to a non-main branch first."
-    ;;
-esac
+verify_agent_work_branch "$current_branch"
 
 task_id="${1-}"
 if [ -z "$task_id" ]; then
@@ -184,6 +354,9 @@ esac
 task_title="$(json_field "$task_file" title)"
 [ -n "$task_title" ] || task_title="$task_id"
 
+task_start_commit="$(ensure_task_run_state "$task_id")" || fail "Could not record or reuse task_start_commit for $task_id."
+printf 'Task %s base commit: %s\n' "$task_id" "$task_start_commit"
+
 revision_prompt=""
 if [ "$task_status" = "needs_revision" ]; then
   revision_prompt="This task has review feedback. Read the latest .agent/reviews/REVIEW-${task_id}-*.json and fix only the required_fixes within the original approved task scope."
@@ -196,16 +369,7 @@ case "$claude_max_turns" in
     ;;
 esac
 
-branch_slug="$(slugify "$task_id")"
-branch_name="agent/${branch_slug}"
-
-if [ "$current_branch" != "$branch_name" ]; then
-  if git rev-parse --verify "$branch_name" >/dev/null 2>&1; then
-    git switch "$branch_name"
-  else
-    git switch -c "$branch_name"
-  fi
-fi
+branch_name="$current_branch"
 
 if [ "$task_status" = "approved" ]; then
   scripts/agent-task-state.py mark-in-progress "$task_id"
@@ -222,12 +386,20 @@ Implement exactly one actionable task:
 - Task file: ${task_file}
 - Task ID: ${task_id}
 - Task title: ${task_title}
+- Current branch: ${current_branch}
+- Configured work branch: ${AGENT_WORK_BRANCH}
+- Branch mode: ${AGENT_BRANCH_MODE}
+- Task start commit: ${task_start_commit}
 
 ${revision_prompt}
 
 Rules:
 - Read AGENTS.md, .agent/operating_rules.md, .agent/handoff.md, and the task file before editing.
+- If .agent/operating_rules.md contains older per-task branch wording, follow AGENTS.md and this prompt for branch behavior.
 - Implement only this task. Do not expand scope or start another task.
+- Stay on the current work branch. Do not create, checkout, switch, rename, or merge branches.
+- Commit only to the current work branch when you commit.
+- Do not push to main, master, or any protected branch.
 - Do not create a new task for review fixes.
 - Do not ask for new human approval for needs_revision fixes when required fixes stay within the original approved task scope.
 - Do not create, modify, print, or request secrets.
@@ -237,8 +409,9 @@ Rules:
 - Run relevant lint, test, typecheck, or build commands when discoverable.
 - Update README or docs only if behavior or setup changed.
 - Update .agent/handoff.md before stopping with status, changed files, tests run, blockers, and next steps.
-- Open or update a draft PR for the task branch when possible. If gh cannot create the PR, document that in .agent/handoff.md and continue.
+- Open or update a draft PR from the current work branch when possible. If gh cannot create the PR, document that in .agent/handoff.md and continue.
 - Do not merge pull requests.
+- Human final review and merge/cherry-pick to main or master are still required after acceptance.
 - Do not mark the task implemented, needs_revision, or blocked. The wrapper and Codex reviewer make the final task status decision.
 PROMPT
 )"

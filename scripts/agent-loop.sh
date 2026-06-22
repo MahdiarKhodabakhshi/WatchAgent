@@ -10,9 +10,10 @@ max_iterations=""
 max_revisions_per_task=3
 skip_planner=0
 consecutive_failures=0
+reset_task_base=0
 
 usage() {
-  printf 'Usage: scripts/agent-loop.sh [--once] [--forever] [--skip-planner] [--sleep-seconds N] [--max-iterations N] [--max-revisions-per-task N]\n' >&2
+  printf 'Usage: scripts/agent-loop.sh [--once] [--forever] [--skip-planner] [--sleep-seconds N] [--max-iterations N] [--max-revisions-per-task N] [--reset-task-base]\n' >&2
 }
 
 fail() {
@@ -29,6 +30,101 @@ require_positive_integer() {
       ;;
     0)
       fail "$label must be greater than zero"
+      ;;
+  esac
+}
+
+load_agent_config() {
+  AGENT_WORK_BRANCH="${AGENT_WORK_BRANCH:-agent_developed}"
+  AGENT_PROTECTED_BRANCHES="${AGENT_PROTECTED_BRANCHES:-main,master}"
+  AGENT_BRANCH_MODE="${AGENT_BRANCH_MODE:-single_work_branch}"
+
+  local config_file=".agent/config.env"
+  local line key value
+  if [ -f "$config_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|\#*)
+          continue
+          ;;
+      esac
+      case "$line" in
+        AGENT_WORK_BRANCH=*|AGENT_PROTECTED_BRANCHES=*|AGENT_BRANCH_MODE=*)
+          key="${line%%=*}"
+          value="${line#*=}"
+          ;;
+        *)
+          fail "Unsupported config line in $config_file. Use simple KEY=value entries only."
+          ;;
+      esac
+      case "$value" in
+        \"*\")
+          value="${value#\"}"
+          value="${value%\"}"
+          ;;
+        \'*\')
+          value="${value#\'}"
+          value="${value%\'}"
+          ;;
+      esac
+      case "$key" in
+        AGENT_WORK_BRANCH)
+          AGENT_WORK_BRANCH="$value"
+          ;;
+        AGENT_PROTECTED_BRANCHES)
+          AGENT_PROTECTED_BRANCHES="$value"
+          ;;
+        AGENT_BRANCH_MODE)
+          AGENT_BRANCH_MODE="$value"
+          ;;
+      esac
+    done < "$config_file"
+  fi
+
+  [[ "$AGENT_WORK_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "AGENT_WORK_BRANCH must be a non-empty git branch name using safe characters."
+  [[ "$AGENT_PROTECTED_BRANCHES" =~ ^[A-Za-z0-9._/,-]+$ ]] || fail "AGENT_PROTECTED_BRANCHES must be a comma-separated branch list using safe characters."
+  [[ "$AGENT_BRANCH_MODE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "AGENT_BRANCH_MODE must use safe characters."
+}
+
+branch_is_protected() {
+  local branch="$1"
+  local protected
+  local old_ifs="$IFS"
+  IFS=,
+  for protected in $AGENT_PROTECTED_BRANCHES; do
+    protected="$(printf '%s' "$protected" | tr -d '[:space:]')"
+    if [ "$branch" = "$protected" ]; then
+      IFS="$old_ifs"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
+verify_agent_work_branch() {
+  local branch
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
+
+  case "$branch" in
+    main|master)
+      fail "Refusing to run agent loop on protected human branch $branch."
+      ;;
+  esac
+
+  if branch_is_protected "$branch"; then
+    fail "Refusing to run agent loop on protected branch $branch."
+  fi
+
+  case "$AGENT_BRANCH_MODE" in
+    single_work_branch)
+      if [ "$branch" != "$AGENT_WORK_BRANCH" ]; then
+        fail "Refusing to run in single_work_branch mode from $branch. Switch to $AGENT_WORK_BRANCH first."
+      fi
+      ;;
+    *)
+      fail "Unsupported AGENT_BRANCH_MODE: $AGENT_BRANCH_MODE"
       ;;
   esac
 }
@@ -65,6 +161,10 @@ while [ "$#" -gt 0 ]; do
       max_revisions_per_task="$1"
       shift
       ;;
+    --reset-task-base)
+      reset_task_base=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -81,6 +181,10 @@ require_positive_integer "--max-revisions-per-task" "$max_revisions_per_task"
 if [ -n "$max_iterations" ]; then
   require_positive_integer "--max-iterations" "$max_iterations"
 fi
+load_agent_config
+if [ "$reset_task_base" -eq 1 ] && [ "$AGENT_BRANCH_MODE" != "single_work_branch" ]; then
+  fail "--reset-task-base is only valid in single_work_branch mode."
+fi
 
 trap 'printf "\nAgent loop stopped by user.\n"; exit 130' INT TERM
 
@@ -92,16 +196,6 @@ write_loop_event() {
   timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   mkdir -p .agent/logs
   printf '%s event=%s task=%s message=%s\n' "$timestamp" "$event" "$task_id" "$message" >> .agent/logs/agent-loop-events.log
-}
-
-refuse_main_branch() {
-  local branch
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
-  case "$branch" in
-    main|master)
-      fail "Refusing to run agent loop on $branch. Create or switch to a non-main branch first."
-      ;;
-  esac
 }
 
 task_status() {
@@ -124,6 +218,79 @@ status = data.get("status")
 if not isinstance(status, str) or not status:
     raise SystemExit(1)
 print(status)
+PY
+}
+
+ensure_task_run_state() {
+  local task_id="$1"
+  local reset_base="$2"
+  local branch
+  local head
+
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  head="$(git rev-parse HEAD)"
+  mkdir -p .agent/run-state
+
+  python3 - "$task_id" "$branch" "$head" "$AGENT_BRANCH_MODE" "$reset_base" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+task_id, branch, head, mode, reset_base = sys.argv[1:6]
+if not re.fullmatch(r"TASK-[A-Za-z0-9._-]+", task_id):
+    print(f"ERROR: Unsafe or invalid task id for run-state: {task_id!r}", file=sys.stderr)
+    raise SystemExit(1)
+if mode != "single_work_branch":
+    print(f"ERROR: Unsupported run-state mode: {mode}", file=sys.stderr)
+    raise SystemExit(1)
+
+run_state_dir = Path(".agent/run-state")
+if run_state_dir.is_symlink():
+    print("ERROR: Refusing to write run-state through symlinked .agent/run-state.", file=sys.stderr)
+    raise SystemExit(1)
+run_state_dir.mkdir(parents=True, exist_ok=True)
+path = run_state_dir / f"{task_id}.json"
+if path.parent != run_state_dir:
+    print(f"ERROR: Refusing unsafe run-state path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+if path.exists() and path.is_symlink():
+    print(f"ERROR: Refusing symlinked run-state file: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+if path.exists() and reset_base != "1":
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"ERROR: Existing run-state is invalid JSON: {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if data.get("task_id") != task_id:
+        print(f"ERROR: Run-state task_id mismatch in {path}.", file=sys.stderr)
+        raise SystemExit(1)
+    if data.get("mode") != mode:
+        print(f"ERROR: Run-state mode mismatch in {path}.", file=sys.stderr)
+        raise SystemExit(1)
+    if data.get("branch") != branch:
+        print(f"ERROR: Run-state branch {data.get('branch')!r} does not match current branch {branch!r}.", file=sys.stderr)
+        raise SystemExit(1)
+    task_start_commit = data.get("task_start_commit")
+    if not isinstance(task_start_commit, str) or not task_start_commit:
+        print(f"ERROR: Run-state is missing task_start_commit: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    print(task_start_commit)
+    raise SystemExit(0)
+
+data = {
+    "task_id": task_id,
+    "branch": branch,
+    "task_start_commit": head,
+    "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "mode": mode,
+}
+path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+print(head)
 PY
 }
 
@@ -252,7 +419,7 @@ append_completion_note() {
     printf '%s\n' "- Task: $task_id"
     printf '%s\n' "- Branch: $branch"
     printf '%s\n' "- Review: $review_file"
-    printf '%s\n' "- Note: Codex review accepted. Human PR review and merge are still required."
+    printf '%s\n' "- Note: Codex review accepted. Human final review and merge/cherry-pick to a protected branch are still required."
   } >> .agent/completed.md
 }
 
@@ -480,8 +647,8 @@ drive_task_to_terminal_review() {
           return 10
         fi
         scripts/agent-notify.sh review_ready "$task_id" || true
-        write_loop_event "review_accepted" "$task_id" "Task implemented; human PR review and merge are still required."
-        printf 'Task %s accepted by Codex review. Human PR review and merge are still required.\n' "$task_id"
+        write_loop_event "review_accepted" "$task_id" "Task implemented on work branch; human final review and merge/cherry-pick are still required."
+        printf 'Task %s accepted by Codex review. Human final review and merge/cherry-pick are still required.\n' "$task_id"
         return 0
         ;;
       needs_revision)
@@ -539,7 +706,7 @@ run_cycle() {
 
   set -e
   scripts/agent-env-check.sh
-  refuse_main_branch
+  verify_agent_work_branch
 
   set +e
   select_actionable_task
@@ -558,6 +725,19 @@ run_cycle() {
       return 10
       ;;
   esac
+
+  if ! task_start_commit="$(ensure_task_run_state "$task_id" "$reset_task_base")"; then
+    write_loop_event "run_state_failed" "$task_id" "Could not record or reuse task_start_commit."
+    scripts/agent-notify.sh loop_failed "$task_id" || true
+    return 10
+  fi
+  if [ "$reset_task_base" -eq 1 ]; then
+    write_loop_event "task_base_reset" "$task_id" "Reset task_start_commit to $task_start_commit."
+    printf 'Task %s base reset to current HEAD: %s\n' "$task_id" "$task_start_commit"
+  else
+    write_loop_event "task_base_ready" "$task_id" "Using task_start_commit $task_start_commit."
+    printf 'Task %s base commit: %s\n' "$task_id" "$task_start_commit"
+  fi
 
   set +e
   drive_task_to_terminal_review "$task_id"

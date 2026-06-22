@@ -14,6 +14,55 @@ fail() {
   exit 1
 }
 
+load_agent_config() {
+  AGENT_WORK_BRANCH="${AGENT_WORK_BRANCH:-agent_developed}"
+  AGENT_PROTECTED_BRANCHES="${AGENT_PROTECTED_BRANCHES:-main,master}"
+  AGENT_BRANCH_MODE="${AGENT_BRANCH_MODE:-single_work_branch}"
+
+  local config_file=".agent/config.env"
+  local line key value
+  if [ -f "$config_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|\#*)
+          continue
+          ;;
+      esac
+      case "$line" in
+        AGENT_WORK_BRANCH=*|AGENT_PROTECTED_BRANCHES=*|AGENT_BRANCH_MODE=*)
+          key="${line%%=*}"
+          value="${line#*=}"
+          ;;
+        *)
+          fail "Unsupported config line in $config_file. Use simple KEY=value entries only."
+          ;;
+      esac
+      case "$value" in
+        \"*\")
+          value="${value#\"}"
+          value="${value%\"}"
+          ;;
+        \'*\')
+          value="${value#\'}"
+          value="${value%\'}"
+          ;;
+      esac
+      case "$key" in
+        AGENT_WORK_BRANCH)
+          AGENT_WORK_BRANCH="$value"
+          ;;
+        AGENT_PROTECTED_BRANCHES)
+          AGENT_PROTECTED_BRANCHES="$value"
+          ;;
+        AGENT_BRANCH_MODE)
+          AGENT_BRANCH_MODE="$value"
+          ;;
+      esac
+    done < "$config_file"
+  fi
+}
+
 reason="${1-}"
 task_id="${2-}"
 
@@ -31,6 +80,7 @@ case "$reason" in
     ;;
 esac
 
+load_agent_config
 mkdir -p .agent/notifications
 
 timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -44,6 +94,30 @@ if [ -z "$current_task" ] && [ -x scripts/agent-task-state.py ]; then
 fi
 if [ -z "$current_task" ]; then
   current_task="none"
+fi
+
+task_status="none"
+if [ "$current_task" != "none" ]; then
+  task_status="$(python3 - "$current_task" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+task_id = sys.argv[1]
+if not re.fullmatch(r"TASK-[A-Za-z0-9._-]+", task_id):
+    print("unknown")
+    raise SystemExit(0)
+path = Path(".agent/tasks") / f"{task_id}.json"
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("unknown")
+else:
+    status = data.get("status")
+    print(status if isinstance(status, str) and status else "unknown")
+PY
+)"
 fi
 
 first_pending_task() {
@@ -67,10 +141,10 @@ next_command() {
       fi
       ;;
     implementation_blocked)
-      printf 'Inspect .agent/handoff.md and the latest .agent/logs/ entry, then rerun scripts/agent-loop.sh.\n'
+      printf 'Inspect .agent/handoff.md and the latest .agent/logs/ entry on %s, then rerun scripts/agent-loop.sh.\n' "$AGENT_WORK_BRANCH"
       ;;
     review_ready)
-      printf 'Review the draft PR manually; agents must not merge it.\n'
+      printf 'Review %s manually or review its draft PR if one exists; only a human may merge/cherry-pick to main/master.\n' "$AGENT_WORK_BRANCH"
       ;;
     auth_failed)
       printf 'Re-authenticate Codex/Claude with subscription login, unset API-key variables, then rerun scripts/agent-loop.sh.\n'
@@ -85,6 +159,13 @@ next_command() {
       printf 'Inspect the latest .agent/reviews/ entry and .agent/handoff.md, then decide whether to approve a new task or manually intervene.\n'
       ;;
   esac
+}
+
+pending_approval_count() {
+  shopt -s nullglob
+  local pending=(.agent/approvals/pending/*.md)
+  shopt -u nullglob
+  printf '%s\n' "${#pending[@]}"
 }
 
 write_pending_approvals() {
@@ -103,12 +184,28 @@ write_pending_approvals() {
   done
 }
 
+approval_needed="no"
+if [ "$reason" = "approval_needed" ] || [ "$(pending_approval_count)" -gt 0 ]; then
+  approval_needed="yes"
+fi
+
+final_review_needed="no"
+if [ "$reason" = "review_ready" ] || [ "$task_status" = "implemented" ]; then
+  final_review_needed="yes"
+fi
+
 {
   printf '# Agent Notification: %s\n\n' "$reason"
   printf '%s\n' "- Reason: $reason"
   printf '%s\n' "- Timestamp: $timestamp"
-  printf '%s\n' "- Branch: $branch"
-  printf '%s\n' "- Current actionable task: $current_task"
+  printf '%s\n' "- Current branch: $branch"
+  printf '%s\n' "- Configured work branch: $AGENT_WORK_BRANCH"
+  printf '%s\n' "- Branch mode: $AGENT_BRANCH_MODE"
+  printf '%s\n' "- Current task: $current_task"
+  printf '%s\n' "- Task status: $task_status"
+  printf '%s\n' "- Human approval needed: $approval_needed"
+  printf '%s\n' "- Human final review/merge needed: $final_review_needed"
+  printf '%s\n' "- Merge policy: agents never merge or push to main/master"
   printf '\n## Pending Approvals\n\n'
   write_pending_approvals
   printf '\n## Next Command\n\n'
@@ -126,7 +223,7 @@ case "$reason" in
     ;;
   review_ready)
     github_label="agent/review-needed"
-    github_title="Agent PR ready for review"
+    github_title="Agent work branch ready for review"
     ;;
 esac
 

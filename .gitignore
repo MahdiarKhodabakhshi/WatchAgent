@@ -16,4 +16,9 @@ frontend/dist/
 # Local two-agent system runtime files
 .agent/logs/*.log
 .agent/notifications/*.md
+.agent/run-state/
 .agent/tmp/
+
+# Agent runtime inbox/state
+.agent/inbox/
+.agent/state/
