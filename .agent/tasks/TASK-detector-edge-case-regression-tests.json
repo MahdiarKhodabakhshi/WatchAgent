@@ -38,7 +38,7 @@
   "objective": "Add focused regression tests for existing detector edge cases while preserving current thresholds, scoring, lifecycle behavior, and evaluation claims.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "needs_revision",
+  "status": "blocked",
   "task_id": "TASK-detector-edge-case-regression-tests",
   "test_plan": [
     "Run the touched detector test file directly, such as `pytest tests/test_native_detectors.py` or the specific file modified.",
@@ -46,7 +46,7 @@
     "Record commands and results in `.agent/handoff.md`."
   ],
   "title": "Add detector edge-case regression tests without threshold changes",
-  "status_updated_at": "2026-06-22T13:58:50Z",
-  "status_reason": "Codex review requires revision. Review file: .agent/reviews/REVIEW-TASK-detector-edge-case-regression-tests-20260622T135752Z.json",
+  "status_updated_at": "2026-06-22T14:02:26Z",
+  "status_reason": "The detector regression test additions appear aligned with the approved task, but the wrapper-provided fd8c8cb3af011d29934f4ed267331368deafb277..HEAD diff still includes extensive unrelated workflow, Telegram, systemd deployment, approval/task metadata, docs, and script changes. Because the handoff says this is a shared-branch/review-base problem that cannot be fixed within the detector-test task without a human/operator decision, the review is blocked.",
   "last_review_file": ".agent/reviews/REVIEW-TASK-detector-edge-case-regression-tests-20260622T135752Z.json"
 }
