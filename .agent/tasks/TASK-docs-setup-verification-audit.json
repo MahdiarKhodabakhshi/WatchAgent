@@ -37,7 +37,7 @@
   "objective": "Make the local setup and verification documentation accurate, easy to follow, and consistent with the current Docker, backend, frontend, evaluation, and agent workflow commands.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "blocked",
+  "status": "implemented",
   "task_id": "TASK-docs-setup-verification-audit",
   "test_plan": [
     "Run the smallest relevant documentation sanity checks available, such as rendering-neutral grep/review checks and any existing docs-related lint if discoverable.",
@@ -45,7 +45,7 @@
     "Record all commands and outcomes in `.agent/handoff.md`."
   ],
   "title": "Audit local setup and verification documentation",
-  "status_updated_at": "2026-06-22T04:06:15Z",
-  "status_reason": "Blocked on branch scope, not README content. The setup, troubleshooting, and verification docs appear to satisfy the approved docs task, but the branch still contains out-of-scope two-agent workflow/script/schema changes that need a human repo-management decision. I could not inspect PR context because gh auth status failed in this sandbox with a bwrap loopback error.",
+  "status_updated_at": "2026-06-22T04:14:38Z",
+  "status_reason": "Human accepted branch-scope decision after merging orchestration work into setup base.",
   "last_review_file": ".agent/reviews/REVIEW-TASK-docs-setup-verification-audit-20260622T035236Z.json"
 }
