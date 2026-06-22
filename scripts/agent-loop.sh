@@ -198,6 +198,31 @@ write_loop_event() {
   printf '%s event=%s task=%s message=%s\n' "$timestamp" "$event" "$task_id" "$message" >> .agent/logs/agent-loop-events.log
 }
 
+notify_task_started() {
+  local task_id="$1"
+  local title status_now branch_now
+  status_now="$(task_status "$task_id" 2>/dev/null || printf 'unknown')"
+  branch_now="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
+  title="$(python3 - "$task_id" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+task_id = sys.argv[1]
+try:
+    data = json.loads(Path(f".agent/tasks/{task_id}.json").read_text(encoding="utf-8"))
+    print(data.get("title", "") or "")
+except Exception:
+    pass
+PY
+)"
+  if [ -x scripts/telegram-send.sh ]; then
+    printf 'WatchAgent [starting] %s (%s)\n%s\nBranch: %s' \
+      "$task_id" "$status_now" "${title:-untitled}" "$branch_now" \
+      | scripts/telegram-send.sh || true
+  fi
+}
+
 task_status() {
   local task_id="$1"
   python3 - "$task_id" <<'PY'
@@ -592,6 +617,7 @@ drive_task_to_terminal_review() {
   local pass_status
 
   printf 'Actionable task selected: %s\n' "$task_id"
+  notify_task_started "$task_id"
 
   while :; do
     if ! current_status="$(task_status "$task_id")"; then
@@ -827,6 +853,13 @@ while :; do
   fi
 
   cycle=$((cycle + 1))
-  printf 'Sleeping %s seconds before next cycle.\n' "$sleep_seconds"
-  sleep "$sleep_seconds"
+  if loop_is_paused; then
+    pause_poll="${AGENT_PAUSE_POLL_SECONDS:-20}"
+    case "$pause_poll" in ''|*[!0-9]*|0) pause_poll=20 ;; esac
+    printf 'Loop is paused; rechecking in %s seconds. Send /resume to continue.\n' "$pause_poll"
+    sleep "$pause_poll"
+  else
+    printf 'Sleeping %s seconds before next cycle.\n' "$sleep_seconds"
+    sleep "$sleep_seconds"
+  fi
 done
