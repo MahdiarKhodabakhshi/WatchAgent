@@ -12,6 +12,20 @@ agent_developed (single_work_branch mode; task start commit fd8c8cb)
 
 Implementation pass complete. Added five focused, deterministic, network-free regression tests to `tests/test_native_detectors.py` that document existing detector edge-case behavior. No detector code, thresholds, scoring weights, severity mapping, lifecycle behavior, climatology artifacts, evaluation metrics, or README claims were changed. (Final task status is set by the wrapper/reviewer, not by Claude.)
 
+### Resume note (20260622T07 — second session)
+
+Resumed after the prior session hit max turns (16) before it could run any verification. Re-confirmed state:
+
+- The five tests are present and already committed in `ed3d0a4` ("WIP: preserve … after max turns"), which changed only `tests/test_native_detectors.py` (+73) and `.agent/handoff.md`. Scope is clean — no detector/source files touched.
+- Re-verified all five tests by inspection against current detector source:
+  - `_pressure_metric` (`app/detection/pressure_plunge.py:99-104`) returns `"surface_pressure"` when `pressure_msl` is absent and `None` when both are absent — matches the two pressure tests. The fallback test mirrors `test_pressure_plunge_fires_on_three_hour_fall_confirmed_by_wind`, so it shares its 7.0 hPa fall / 10.0 km/h wind-rise expectations.
+  - The `dew_point is None` / `wind_speed is None` guards (`app/detection/stress.py:34,100`) make the two missing-field tests non-firing.
+  - `wind_chill` returns `None` for `wind_kmh <= MIN_WIND_CHILL_KMH (4.8)` (`app/detection/stress.py:165`), so the 4.0 km/h calm-wind test is non-firing.
+- The `_reading`/`_history` helpers pass `None` through `SimpleNamespace` (type hints are not enforced at runtime), so the missing-field tests construct valid readings.
+- The prior Codex review (`REVIEW-…-20260622T065535Z`) returned `verdict: blocked` only because the wrapper handed the reviewer an empty Task JSON/handoff/diff — a reviewer-context plumbing issue, not a defect in this work. The real diff is in `ed3d0a4`; a re-run with populated context should review the actual change. The two untracked `REVIEW-…` files and the unrelated `M`/`??` task/approval files in the working tree belong to the agent infrastructure, not this task, and were left untouched.
+
+Nothing further changed in this resume beyond this handoff note.
+
 ### What this task added (20260622)
 
 New tests, all using the existing `_reading`/`_history`/`_ctx` helpers and the `_mini_climatology()` fixture in `tests/test_native_detectors.py`:
@@ -31,8 +45,9 @@ These document current behavior only (missing-optional-field handling and a bord
 
 ### Tests Run (this task)
 
-- `python -m pytest tests/test_native_detectors.py -q` — NOT RUN. Blocked: shell commands require interactive approval in this sandbox (same gate documented for the prior task); per the operating rules I did not bypass the gate or retry beyond confirming the block.
-- `.venv/bin/pytest tests/test_native_detectors.py -q` and `python -m pytest tests/test_native_detectors.py -q -k "pressure_plunge or stress"` — NOT RUN, same reason.
+- `.venv/bin/pytest tests/test_native_detectors.py -q` — NOT RUN. Gated: requires interactive approval in this autonomous sandbox. Read-only commands (`git log`, `git show`, `grep`, `test -x`) run without approval, but `pytest` does not. Per operating rules I did not bypass the sandbox; I confirmed the gate twice and stopped retrying.
+- `.venv/bin/python -m pytest tests/test_native_detectors.py -q -p no:cacheprovider` — NOT RUN, same gate.
+- `.venv/bin/ruff check tests/test_native_detectors.py` — NOT RUN, same gate. The additions copy the indentation, line length, and assertion style of the adjacent happy-path/near-miss tests, so lint risk is minimal.
 - Verification by inspection: each new test was traced against the detector source (`app/detection/pressure_plunge.py` `_pressure_metric`/`k_hour_delta`/`_historical_deltas`, `app/detection/stress.py` `wind_chill`/`humidex` and the `numeric_attr is None` guards) and mirrors the existing happy-path/near-miss tests' helper usage and assertions. The `surface_pressure` fallback test mirrors `test_pressure_plunge_fires_on_three_hour_fall_confirmed_by_wind` exactly except for the metric, so it shares that test's expected deltas (7.0 hPa fall, 10.0 km/h wind rise). A reviewer with shell access should run `pytest tests/test_native_detectors.py -q` to confirm green.
 
 ### Blockers (this task)
@@ -217,3 +232,13 @@ Other:
 - Status: blocked
 - Note: Claude stopped after reaching the configured max turns (16). Resume the same task after reviewing the handoff.
 - Log: .agent/logs/claude-implementer-20260622T062446Z.log
+
+## Script Update 20260622T090316Z
+
+- Current task: TASK-detector-edge-case-regression-tests
+- Current branch: agent_developed
+- Configured work branch: agent_developed
+- Branch mode: single_work_branch
+- Status: blocked
+- Note: Claude stopped after reaching the configured max turns (16). Resume the same task after reviewing the handoff.
+- Log: .agent/logs/claude-implementer-20260622T090316Z.log

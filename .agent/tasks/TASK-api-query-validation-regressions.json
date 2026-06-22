@@ -7,7 +7,7 @@
     "Any discovered behavior improvement is recorded as a follow-up rather than implemented in this task."
   ],
   "approval_required": true,
-  "approved_by": null,
+  "approved_by": "human",
   "area": "backend-tests",
   "context": "The backlog calls for small low-risk tests and API error consistency review. This task is test-focused: it should capture current behavior around valid and invalid query parameters, limits, city filters, and datetime filters. If current behavior appears inconsistent or undesirable, record a follow-up proposed task instead of changing API behavior in this task.",
   "created_at": "2026-06-21T22:36:50Z",
@@ -37,7 +37,7 @@
   "objective": "Strengthen confidence in existing `/readings` and `/events` query validation behavior with focused tests that document current API contracts without changing behavior.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "proposed",
+  "status": "approved",
   "task_id": "TASK-api-query-validation-regressions",
   "test_plan": [
     "Run `pytest tests/test_api.py`.",

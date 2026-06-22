@@ -7,7 +7,7 @@
     "`.agent/handoff.md` records changed files, verification commands, results, blockers, and residual risk."
   ],
   "approval_required": true,
-  "approved_by": null,
+  "approved_by": "human",
   "area": "agent-workflow",
   "context": "Git status shows an untracked `.agent/schemas/review.schema.json` on the active agent branch. The repository treats `.agent/` as shared durable state for the two-agent workflow, so schema files should not remain ambiguous. This task is limited to local agent workflow metadata, reviewer validation, and documentation; it must not change application behavior.",
   "created_at": "2026-06-22T00:10:51Z",
@@ -41,7 +41,7 @@
   "objective": "Make `.agent/schemas/review.schema.json` intentional durable workflow state by validating and documenting how reviewer output should use it, or record a blocker if its intended role is unclear.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "proposed",
+  "status": "approved",
   "task_id": "TASK-agent-workflow-review-schema-validation",
   "test_plan": [
     "Run JSON syntax validation for touched schema files, such as `python3 -m json.tool .agent/schemas/review.schema.json`.",
