@@ -37,12 +37,14 @@
   "objective": "Make the local setup and verification documentation accurate, easy to follow, and consistent with the current Docker, backend, frontend, evaluation, and agent workflow commands.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "approved",
+  "status": "in_progress",
   "task_id": "TASK-docs-setup-verification-audit",
   "test_plan": [
     "Run the smallest relevant documentation sanity checks available, such as rendering-neutral grep/review checks and any existing docs-related lint if discoverable.",
     "Run or dry-check documented commands only when they are safe and local; do not start destructive cleanup or long-running backfills unless already documented as optional.",
     "Record all commands and outcomes in `.agent/handoff.md`."
   ],
-  "title": "Audit local setup and verification documentation"
+  "title": "Audit local setup and verification documentation",
+  "status_updated_at": "2026-06-22T00:12:42Z",
+  "status_reason": "Selected for implementation by the agent loop."
 }

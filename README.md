@@ -29,12 +29,19 @@ The dashboard window control includes fixed 24-hour, 7-day, and 14-day views plu
 
 ### Recreate a local dev DB
 
-This repo does not use Alembic. Schema changes are additive in SQLAlchemy models, and a clean clone creates the right SQLite tables automatically. Existing local databases from an older schema should be recreated:
+This repo does not use Alembic. Schema changes are additive in SQLAlchemy models, and a clean clone creates the right SQLite tables automatically. Existing local databases from an older schema should be recreated.
+
+Under Docker Compose the database lives in the `watchagent-data` named volume (mounted at `/srv/data` in the container), not in the host `./data/` directory. Deleting the host file does not reset the container's database; remove the volume instead:
 
 ```
-docker compose down
-rm -f data/watchagent.db data/watchagent.db-*
+docker compose down -v
 docker compose up --build
+```
+
+For a non-Docker local run, the database is the host SQLite file referenced by `DATABASE_URL` (default `./data/watchagent.db`). Recreate it with:
+
+```
+rm -f data/watchagent.db data/watchagent.db-*
 ```
 
 ### Backfill for local testing
@@ -57,6 +64,14 @@ python3 scripts/build_climatology.py --start-date 2015-01-01 --end-date 2021-12-
 ```
 
 The committed artifact is intentionally fit on a historical training window. Evaluation replays use a later, disjoint test window, so detector-rate claims are never measured on the same years used to define the seasonal baselines.
+
+## Troubleshooting
+
+Common local issues and where they are covered above:
+
+- **Port 8000 already in use.** Compose maps `${HOST_PORT:-8000}:8000`. Set `HOST_PORT` in `.env` to a free port (for example `HOST_PORT=8010`) before `docker compose up`, then curl that port.
+- **Empty `/readings` or `/events`.** A fresh database has no rows until the poller stores its first Open-Meteo response. `/health` still returns 200 with zero counts. To populate data immediately without waiting for the live poll cadence, run the [backfill](#backfill-for-local-testing) above.
+- **Stale or old-schema database.** Reset it as described in [Recreate a local dev DB](#recreate-a-local-dev-db). Under Docker this means `docker compose down -v` to clear the named volume; deleting the host `./data/` file only affects non-Docker local runs.
 
 ## Architecture
 
@@ -334,7 +349,8 @@ The optional LLM-backed data-analysis skill requires `ANTHROPIC_API_KEY`. The Wa
 ## Development
 
 ```
-python3 -m pip install -e ".[dev]"
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/pytest -q
 .venv/bin/ruff check app tests scripts
 npm --prefix frontend install
@@ -342,6 +358,8 @@ npm --prefix frontend run typecheck
 npm --prefix frontend run lint
 docker compose build
 ```
+
+The backend checks use a local virtualenv at `.venv`; the `.venv/bin/...` commands assume it exists. `pytest` and `ruff` are the fastest backend verification, the three `npm` commands cover the frontend, and `docker compose build` validates the container image.
 
 CI runs lint, tests, frontend checks, and a Docker build, and boots the containerized service with `docker compose up --build --wait` to assert `GET /health` returns 200 with the expected JSON shape (poller disabled, fresh empty DB). Tests that touch Open-Meteo use mocks; no credentials are committed or required.
 
