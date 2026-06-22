@@ -350,8 +350,12 @@ steerable from Telegram), keep both alive with a supervisor:
 
   ```bash
   scripts/agent-supervisor.sh telegram -- scripts/agent-telegram-bot.py &
-  AGENT_AUTO_APPROVE=low scripts/agent-supervisor.sh loop -- scripts/agent-loop.sh --forever &
+  AGENT_AUTO_APPROVE=low CLAUDE_MAX_TURNS=40 \
+    scripts/agent-supervisor.sh loop -- scripts/agent-loop.sh --forever &
   ```
+
+  `CLAUDE_MAX_TURNS` (default 16) is the implementer's per-task turn budget;
+  raise it so larger tasks finish in one pass instead of stopping as WIP.
 
   Stop a supervised process cleanly: `touch .agent/state/supervisor-<name>.stop`.
 

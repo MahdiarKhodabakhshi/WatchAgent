@@ -10,6 +10,9 @@ ExecStart=__REPO_DIR__/scripts/agent-loop.sh --forever
 Restart=always
 RestartSec=30
 Environment=PYTHONUNBUFFERED=1
+# Give the implementer a larger turn budget so bigger tasks finish in one pass
+# instead of stopping as WIP at the default 16 turns.
+Environment=CLAUDE_MAX_TURNS=40
 # Keep the queue fed so the loop does not stall on the approval gate.
 # Auto-approves only low-risk proposed tasks; high-risk always needs a human.
 # Remove this line to require manual/Telegram approval for every task.

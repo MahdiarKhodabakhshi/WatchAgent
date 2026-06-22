@@ -67,7 +67,14 @@ everything.
 
 ```bash
 scripts/agent-supervisor.sh telegram -- scripts/agent-telegram-bot.py &
-AGENT_AUTO_APPROVE=low scripts/agent-supervisor.sh loop -- scripts/agent-loop.sh --forever &
+AGENT_AUTO_APPROVE=low CLAUDE_MAX_TURNS=40 \
+  scripts/agent-supervisor.sh loop -- scripts/agent-loop.sh --forever &
 ```
 
 Stop a supervised process: `touch .agent/state/supervisor-<name>.stop`.
+
+## Turn budget
+
+`watchagent-loop.service` sets `CLAUDE_MAX_TURNS=40` (default is 16) so larger
+tasks finish in one implementer pass instead of being checkpointed as WIP. Tune
+it up for bigger tasks or down to cap per-task usage.
