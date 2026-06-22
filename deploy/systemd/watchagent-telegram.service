@@ -10,6 +10,9 @@ ExecStart=__REPO_DIR__/scripts/agent-telegram-bot.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+# systemd user services get a minimal PATH; add ~/.local/bin (claude, codex)
+# and the repo virtualenv so the scripts can find their tools.
+Environment=PATH=%h/.local/bin:__REPO_DIR__/.venv/bin:/usr/local/bin:/usr/bin:/bin
 # Subscription-only workflow: never set OPENAI_API_KEY / CODEX_API_KEY /
 # ANTHROPIC_API_KEY here. The bot reads its token from .agent/telegram.env.
 

@@ -10,6 +10,9 @@ ExecStart=__REPO_DIR__/scripts/agent-loop.sh --forever
 Restart=always
 RestartSec=30
 Environment=PYTHONUNBUFFERED=1
+# systemd user services get a minimal PATH; add ~/.local/bin (claude, codex) and
+# the repo virtualenv so the scripts can find their tools.
+Environment=PATH=%h/.local/bin:__REPO_DIR__/.venv/bin:/usr/local/bin:/usr/bin:/bin
 # Give the implementer a larger turn budget so bigger tasks finish in one pass
 # instead of stopping as WIP at the default 16 turns.
 Environment=CLAUDE_MAX_TURNS=40
