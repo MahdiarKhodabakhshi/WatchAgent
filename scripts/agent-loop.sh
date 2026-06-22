@@ -94,6 +94,48 @@ write_loop_event() {
   printf '%s event=%s task=%s message=%s\n' "$timestamp" "$event" "$task_id" "$message" >> .agent/logs/agent-loop-events.log
 }
 
+notify_step_started() {
+  local phase="$1"
+  local task_id="${2:-none}"
+  local next_action="${3:-}"
+  local args=(step_started --phase "$phase" --task-id "$task_id")
+  if [ -n "$next_action" ]; then
+    args+=(--next-action "$next_action")
+  fi
+  scripts/agent-notify.sh "${args[@]}" || true
+}
+
+notify_step_finished() {
+  local phase="$1"
+  local task_id="${2:-none}"
+  local verdict="${3:-}"
+  local blocker="${4:-}"
+  local next_action="${5:-}"
+  local args=(step_finished --phase "$phase" --task-id "$task_id")
+  if [ -n "$verdict" ]; then
+    args+=(--verdict "$verdict")
+  fi
+  if [ -n "$blocker" ]; then
+    args+=(--blocker "$blocker")
+  fi
+  if [ -n "$next_action" ]; then
+    args+=(--next-action "$next_action")
+  fi
+  scripts/agent-notify.sh "${args[@]}" || true
+}
+
+check_paused_before_cycle() {
+  if [ ! -f .agent/PAUSED ]; then
+    return 1
+  fi
+  write_loop_event "paused" "none" "Agent loop is paused by .agent/PAUSED."
+  scripts/agent-notify.sh implementation_blocked \
+    --phase paused \
+    --blocker "Agent loop is paused by .agent/PAUSED." \
+    --next-action "Send /resume from Telegram or remove .agent/PAUSED locally." || true
+  return 0
+}
+
 refuse_main_branch() {
   local branch
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
@@ -290,13 +332,18 @@ select_actionable_task() {
 
   if [ "$skip_planner" -eq 1 ]; then
     write_loop_event "no_actionable_skip_planner" "none" "No actionable task exists and planner was skipped."
+    scripts/agent-notify.sh approval_needed \
+      --phase planner \
+      --next-action "Approve a proposed task, send /task or /goal from Telegram, or rerun without --skip-planner." || true
     printf 'No actionable task found and --skip-planner was passed.\n'
     return 2
   fi
 
+  notify_step_started "planner" "none" "Run Codex planner because no actionable task is available."
   if ! scripts/codex-planner.sh; then
     local failure_kind
     failure_kind="$(classify_latest_failure "codex-planner")"
+    notify_step_finished "planner" "none" "$failure_kind" "Codex planner failed." "Inspect the latest .agent/logs/codex-planner-*.log."
     case "$failure_kind" in
       usage_limit)
         write_loop_event "codex_usage_limit" "none" "Codex planner reported a usage or session limit."
@@ -318,9 +365,11 @@ select_actionable_task() {
 
   if selected_task_id="$(scripts/agent-task-state.py get-next)"; then
     write_loop_event "task_selected_after_planner" "$selected_task_id" "Planner produced or preserved actionable work."
+    notify_step_finished "planner" "$selected_task_id" "task_selected" "" "Continue to implementation."
     return 0
   fi
 
+  notify_step_finished "planner" "none" "approval_needed" "" "Wait for human approval or a new Telegram /task or /goal."
   scripts/agent-notify.sh approval_needed || true
   write_loop_event "approval_needed" "none" "No actionable task exists after planner."
   printf 'No approved tasks. Review .agent/approvals/pending/ and approve one with scripts/agent-approve.sh TASK-ID.\n'
@@ -436,26 +485,32 @@ drive_task_to_terminal_review() {
         ;;
     esac
 
+    notify_step_started "implementer" "$task_id" "Run Claude Code for the selected task."
     set +e
     run_claude_pass "$task_id"
     pass_status="$?"
     set -e
     if [ "$pass_status" -ne 0 ]; then
+      notify_step_finished "implementer" "$task_id" "failed" "Claude implementer exited with status $pass_status." "Inspect .agent/handoff.md and the latest Claude log."
       set +e
       return "$pass_status"
     fi
+    notify_step_finished "implementer" "$task_id" "completed" "" "Start Codex review."
 
+    notify_step_started "reviewer" "$task_id" "Run Codex reviewer for the implementation."
     set +e
     run_review_pass "$task_id"
     pass_status="$?"
     set -e
     if [ "$pass_status" -ne 0 ]; then
+      notify_step_finished "reviewer" "$task_id" "failed" "Codex reviewer exited with status $pass_status." "Inspect .agent/logs/agent-loop-events.log and the latest reviewer log."
       set +e
       return "$pass_status"
     fi
 
     if ! review_file="$(latest_review_json "$task_id")"; then
       write_loop_event "review_missing" "$task_id" "Codex reviewer did not produce review JSON."
+      notify_step_finished "reviewer" "$task_id" "failed" "Codex reviewer did not produce review JSON." "Inspect the latest reviewer log."
       scripts/agent-notify.sh loop_failed "$task_id" || true
       set +e
       return 10
@@ -463,12 +518,14 @@ drive_task_to_terminal_review() {
 
     if ! verdict="$(review_verdict "$review_file")"; then
       write_loop_event "review_invalid" "$task_id" "Review JSON is missing required fields or has an invalid verdict."
+      notify_step_finished "reviewer" "$task_id" "failed" "Review JSON is missing required fields or has an invalid verdict." "Inspect $review_file."
       scripts/agent-notify.sh loop_failed "$task_id" || true
       set +e
       return 10
     fi
 
     summary="$(review_summary "$review_file")"
+    notify_step_finished "reviewer" "$task_id" "$verdict" "" "Apply Codex review verdict."
     case "$verdict" in
       accepted)
         scripts/agent-task-state.py mark-implemented "$task_id"
@@ -568,6 +625,21 @@ run_cycle() {
 
 cycle=1
 while :; do
+  if check_paused_before_cycle; then
+    if [ "$forever" -ne 1 ]; then
+      printf 'Agent loop is paused by .agent/PAUSED. Send /resume from Telegram or remove .agent/PAUSED locally.\n'
+      break
+    fi
+    if [ -n "$max_iterations" ] && [ "$cycle" -ge "$max_iterations" ]; then
+      printf 'Agent loop reached --max-iterations %s while paused.\n' "$max_iterations"
+      break
+    fi
+    cycle=$((cycle + 1))
+    printf 'Agent loop is paused. Sleeping %s seconds before checking again.\n' "$sleep_seconds"
+    sleep "$sleep_seconds"
+    continue
+  fi
+
   printf 'Starting agent loop cycle %s\n' "$cycle"
 
   set +e

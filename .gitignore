@@ -17,3 +17,6 @@ frontend/dist/
 .agent/logs/*.log
 .agent/notifications/*.md
 .agent/tmp/
+.agent/state/
+.agent/inbox/telegram/*.json
+.env.agent

@@ -24,7 +24,9 @@ Agents never push directly to `main` or `master`, never merge PRs, and never use
 - `.agent/handoff.md`: Resumable current-state handoff.
 - `.agent/reviews/`: Markdown and JSON Codex review outputs.
 - `.agent/approvals/`: Human approval records.
+- `.agent/inbox/`: Durable human commands, goals, tasks, and Telegram inbox responses.
 - `.agent/notifications/`: Local notification markdown files, ignored by git.
+- `.agent/state/`: Local runtime offsets and state, ignored by git.
 - `.agent/logs/`: Local script logs, ignored by git.
 - `.agent/tmp/`: Local planner/reviewer prompts and transient output, ignored by git.
 
@@ -107,6 +109,68 @@ No approved tasks. Review .agent/approvals/pending/ and approve one with scripts
 ```
 
 Proposed tasks still require human approval before Claude may implement them.
+
+Telegram approvals use the same gate. From the configured Telegram chat, send the exact command:
+
+```text
+/approve TASK-ID
+```
+
+High-risk or token-gated approvals can include the optional token field:
+
+```text
+/approve TASK-ID TOKEN
+```
+
+## Telegram Bridge
+
+Telegram is the supported remote communication bridge for the local two-agent workflow. It sends short phase summaries and accepts strict human commands. Email is not implemented; it is future work.
+
+Configure these environment variables outside the repo, or in a local ignored `.env.agent` file that you source manually:
+
+```bash
+export TELEGRAM_BOT_TOKEN="..."
+export TELEGRAM_CHAT_ID="..."
+export AGENT_NOTIFY_CHANNEL=telegram
+```
+
+Do not commit bot tokens, chat IDs, `.env.agent`, or command transcripts containing secrets.
+
+When `AGENT_NOTIFY_CHANNEL=telegram`, `scripts/agent-notify.sh` writes the normal `.agent/notifications/*.md` file and then calls `scripts/telegram-send.sh`. The sender uses Telegram Bot API `sendMessage` over HTTPS with `curl`, truncates messages to about 900 characters, never prints the bot token, and falls back to a local `.agent/notifications/telegram-send.md` note if credentials or `curl` are unavailable.
+
+Poll Telegram manually with a bounded one-shot command:
+
+```bash
+python3 scripts/telegram-inbox.py
+```
+
+The inbox poller calls Telegram Bot API `getUpdates` once, stores accepted raw updates as `.agent/inbox/telegram/update-<update_id>.json`, tracks the next offset in `.agent/state/telegram-offset.json`, and dispatches commands through `scripts/agent-command-dispatch.py` with argv lists only.
+
+Supported Telegram commands:
+
+- `/status`: Summarize branch, pause state, actionable task, pending approvals, and latest notification.
+- `/approve TASK-ID [TOKEN]`: Approve a proposed task through the existing approval helper when available.
+- `/reject TASK-ID reason`: Mark a task rejected and record the reason.
+- `/pause`: Create `.agent/PAUSED`; the loop will stop before starting a one-cycle run or sleep in forever mode.
+- `/resume`: Remove `.agent/PAUSED`.
+- `/goal text...`: Write a durable `.agent/inbox/human-goal-<timestamp>.md`.
+- `/task text...`: Write a durable `.agent/inbox/human-task-<timestamp>.md`.
+- `/details TASK-ID`: Return a concise task and approval/review summary.
+
+To pause the automation, send `/pause`. The next outer loop cycle records an `implementation_blocked` notification and stops in one-cycle mode or sleeps in forever mode. Send `/resume` to remove `.agent/PAUSED`.
+
+Use `/goal text...` for broader product direction and `/task text...` for a concrete requested task. Both are durable inbox files for the local workflow; they do not execute code or start the loop.
+
+Security rules:
+
+- Only messages from `TELEGRAM_CHAT_ID` are accepted.
+- Approval commands must match the supported syntax exactly; unknown commands get short help.
+- Task IDs are restricted to safe filename characters and cannot contain slashes, backslashes, path traversal, or absolute paths.
+- Telegram text never becomes shell code. The dispatcher does not run arbitrary shell commands.
+- All command outputs and actions are recorded under `.agent/`.
+- Foreign chat updates are ignored or recorded only as sanitized rejection metadata.
+- Bot tokens, chat IDs, API keys, and secrets must not be committed.
+- This workflow must not use `OPENAI_API_KEY`, `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN`.
 
 ## Task Status Lifecycle
 
@@ -192,9 +256,17 @@ Run manually when needed:
 ```bash
 scripts/agent-notify.sh approval_needed
 scripts/agent-notify.sh review_ready TASK-ID
+scripts/agent-notify.sh step_started --phase planner --task-id TASK-ID
+scripts/agent-notify.sh step_finished --phase reviewer --task-id TASK-ID --verdict accepted
 ```
 
-Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready`, `auth_failed`, `usage_limit`, `loop_failed`, and `max_revisions_reached`. Each notification includes the reason, timestamp, branch, current actionable task, pending approvals, and the next command for the human.
+Supported events are `step_started`, `step_finished`, `approval_needed`, `review_ready`, `implementation_blocked`, `auth_failed`, `usage_limit`, `loop_failed`, and `max_revisions_reached`. Each notification includes the event, timestamp, branch, task, optional phase, verdict or blocker, pending approvals, and the next human action.
+
+Set `AGENT_NOTIFY_CHANNEL=telegram` to enable Telegram delivery in addition to local notification files:
+
+```bash
+export AGENT_NOTIFY_CHANNEL=telegram
+```
 
 GitHub issue creation is best-effort. If `gh` is authenticated and a remote exists, approval and review notifications can create or comment on issues labeled `agent/approval-needed` or `agent/review-needed`. GitHub is not required for success.
 
