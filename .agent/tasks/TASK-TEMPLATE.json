@@ -1,0 +1,40 @@
+{
+  "task_id": "TASK-TEMPLATE",
+  "title": "Example task title",
+  "status": "proposed",
+  "source": "template",
+  "created_at": "2026-06-21T00:00:00Z",
+  "risk": "low",
+  "area": "docs",
+  "approval_required": true,
+  "approved_by": null,
+  "objective": "Describe the smallest useful outcome for this task.",
+  "context": "Add relevant background, links, constraints, and known risks here.",
+  "implementation_plan": [
+    "Read the relevant files and confirm the current behavior.",
+    "Make the smallest scoped change that satisfies the objective.",
+    "Update handoff and docs only when needed."
+  ],
+  "acceptance_criteria": [
+    "The requested behavior is implemented.",
+    "The change stays within the approved scope.",
+    "No forbidden changes are made."
+  ],
+  "test_plan": [
+    "Run the smallest relevant local verification command.",
+    "Record any tests that could not be run and why."
+  ],
+  "files_likely_to_change": [
+    "docs/example.md"
+  ],
+  "forbidden_changes": [
+    "Do not modify secrets.",
+    "Do not change deployment, auth, billing, database migrations, or external services.",
+    "Do not expand the task beyond the approved scope."
+  ],
+  "done_definition": [
+    "Implementation is complete and scoped.",
+    "Relevant verification has passed or blockers are documented.",
+    ".agent/handoff.md is updated."
+  ]
+}

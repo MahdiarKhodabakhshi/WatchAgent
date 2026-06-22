@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/agent/review.schema.json",
+  "title": "Codex Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "verdict",
+    "summary",
+    "scope_check",
+    "tests_check",
+    "docs_check",
+    "security_check",
+    "required_fixes",
+    "recommended_followups"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-[A-Za-z0-9._-]+$"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "needs_revision",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope_check": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tests_check": {
+      "type": "string",
+      "minLength": 1
+    },
+    "docs_check": {
+      "type": "string",
+      "minLength": 1
+    },
+    "security_check": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_fixes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recommended_followups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
