@@ -1,0 +1,17 @@
+[Unit]
+Description=WatchAgent Telegram inbound command bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/scripts/agent-telegram-bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Subscription-only workflow: never set OPENAI_API_KEY / CODEX_API_KEY /
+# ANTHROPIC_API_KEY here. The bot reads its token from .agent/telegram.env.
+
+[Install]
+WantedBy=default.target

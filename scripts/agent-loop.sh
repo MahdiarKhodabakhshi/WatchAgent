@@ -446,10 +446,31 @@ commit_loop_checkpoint() {
   git commit -m "Agent review ${task_id}: ${verdict}"
 }
 
+maybe_auto_approve() {
+  local level="${AGENT_AUTO_APPROVE:-}"
+  case "$level" in
+    ''|off|none)
+      return 0
+      ;;
+    low|medium)
+      ;;
+    *)
+      write_loop_event "auto_approve_invalid" "none" "AGENT_AUTO_APPROVE=$level is not low|medium; ignoring."
+      return 0
+      ;;
+  esac
+  if scripts/agent-autoapprove.sh --max-risk "$level" >/dev/null 2>&1; then
+    write_loop_event "auto_approve_ran" "none" "Auto-approved proposed tasks up to risk=$level."
+  fi
+}
+
 selected_task_id=""
 
 select_actionable_task() {
   selected_task_id=""
+
+  maybe_auto_approve
+
   if selected_task_id="$(scripts/agent-task-state.py get-next)"; then
     write_loop_event "task_selected" "$selected_task_id" "Selected existing actionable task."
     return 0
@@ -482,6 +503,8 @@ select_actionable_task() {
         ;;
     esac
   fi
+
+  maybe_auto_approve
 
   if selected_task_id="$(scripts/agent-task-state.py get-next)"; then
     write_loop_event "task_selected_after_planner" "$selected_task_id" "Planner produced or preserved actionable work."

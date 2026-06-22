@@ -328,6 +328,43 @@ the planner context on the next planning run. Both `.agent/inbox/` and
 `.agent/state/` are gitignored runtime directories; clear processed inbox files
 manually when they are no longer relevant.
 
+## Always-On Operation
+
+The loop and the Telegram bot are both long-running processes that nothing starts
+automatically. To run the system continuously (research/develop on its own,
+steerable from Telegram), keep both alive with a supervisor:
+
+- systemd user services (survives logout/reboot): see `deploy/systemd/README.md`.
+- Portable fallback (`scripts/agent-supervisor.sh`), which restarts a child on
+  crash with capped backoff:
+
+  ```bash
+  scripts/agent-supervisor.sh telegram -- scripts/agent-telegram-bot.py &
+  AGENT_AUTO_APPROVE=low scripts/agent-supervisor.sh loop -- scripts/agent-loop.sh --forever &
+  ```
+
+  Stop a supervised process cleanly: `touch .agent/state/supervisor-<name>.stop`.
+
+### Keeping the queue fed (approval policy)
+
+In `--forever`, when only `proposed` tasks exist the loop re-plans, writes an
+`approval_needed` notification, and waits — it does not implement unapproved
+work. To keep it moving unattended, set `AGENT_AUTO_APPROVE`:
+
+```bash
+AGENT_AUTO_APPROVE=low scripts/agent-loop.sh --forever      # auto-approve low-risk only
+AGENT_AUTO_APPROVE=medium scripts/agent-loop.sh --forever   # low + medium
+```
+
+The loop runs `scripts/agent-autoapprove.sh` before each selection. **High-risk
+tasks are never auto-approved**; they always require an explicit human approval
+(`scripts/agent-approve.sh --allow-high-risk TASK-ID` or Telegram `/approve`).
+Leave `AGENT_AUTO_APPROVE` unset to require human approval for every task (the
+default, unchanged behavior). You can also approve on demand from Telegram, or
+keep a pre-approved backlog under "Approved Now" in `.agent/backlog.md`.
+
+`scripts/agent-autoapprove.sh [--max-risk low|medium]` can also be run by hand.
+
 ## Human Final Integration
 
 Agents do not merge into protected branches. After a task is accepted, a human can inspect the work branch and manually merge or cherry-pick:

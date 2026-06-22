@@ -1,0 +1,22 @@
+[Unit]
+Description=WatchAgent autonomous plan/implement/review loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/scripts/agent-loop.sh --forever
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+# Keep the queue fed so the loop does not stall on the approval gate.
+# Auto-approves only low-risk proposed tasks; high-risk always needs a human.
+# Remove this line to require manual/Telegram approval for every task.
+Environment=AGENT_AUTO_APPROVE=low
+# Subscription-only workflow: never set OPENAI_API_KEY / CODEX_API_KEY /
+# ANTHROPIC_API_KEY here. Codex (ChatGPT login) and Claude (subscription OAuth)
+# read their own credential files from $HOME.
+
+[Install]
+WantedBy=default.target
