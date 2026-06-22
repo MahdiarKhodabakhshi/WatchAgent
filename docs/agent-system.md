@@ -3,8 +3,8 @@
 This repository uses a local, subscription-first autonomous loop:
 
 1. The wrapper gathers repository context.
-2. Codex emits planner JSON only.
-3. The wrapper validates and materializes plans, tasks, and approvals.
+2. Codex emits delta planner JSON only.
+3. The wrapper validates and materializes plans, new tasks, and missing approvals.
 4. If no actionable approved task exists, the wrapper notifies the human and stops, unless `--forever` is active.
 5. Claude Code implements exactly one actionable task.
 6. Claude or the wrapper opens or updates a draft PR when possible.
@@ -47,6 +47,8 @@ scripts/agent-loop.sh
 ```
 
 The default runs one complete cycle: plan, select one actionable task, implement, open or update a draft PR, review, update task state, checkpoint, then stop. It refuses to run on `main` or `master`.
+
+If planning fails but an existing `approved`, `in_progress`, or `needs_revision` task is already available, the loop records the planner failure and continues with that one actionable task. If planning fails and no actionable task exists, the loop writes a `loop_failed` notification and stops.
 
 ## Forever Mode
 
@@ -115,7 +117,11 @@ Run the planner directly when needed:
 scripts/codex-planner.sh
 ```
 
-The wrapper gathers context into `.agent/tmp/planner-context.md`, asks Codex for JSON only, validates the output, and materializes files through `scripts/materialize-planner-output.py`. Existing approved or human-touched task files are not overwritten. Existing unapproved `proposed` tasks may be refreshed safely.
+The wrapper gathers context into `.agent/tmp/planner-context.md`, asks Codex for JSON only, validates the output, and materializes files through `scripts/materialize-planner-output.py`. Existing task files are not overwritten.
+
+Planner output is delta-based. Codex should emit full task objects only for new tasks, while `recommended_order` may reference task IDs that already exist in `.agent/tasks/`. If no new tasks are needed, the planner returns `"tasks": []` and keeps any still-relevant existing task IDs in `recommended_order`.
+
+The materializer validates `recommended_order` against both task IDs in the current planner output and existing `.agent/tasks/*.json` files, ignoring `TASK-TEMPLATE.json`. Existing task files are not overwritten. For existing `proposed` tasks, the materializer only creates a missing pending approval file; proposed tasks still require human approval before implementation. Existing `approved`, `in_progress`, `needs_revision`, `implemented`, and `blocked` tasks are not regenerated.
 
 ## Implementer Behavior
 
@@ -190,7 +196,7 @@ For usage or max-turn stops:
 2. Wait for usage to reset, or increase `CLAUDE_MAX_TURNS` for a scoped retry.
 3. Resume the same task with `scripts/agent-loop.sh`.
 
-For planner, reviewer, or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause.
+For planner failures, inspect `.agent/logs/agent-loop-events.log` and the latest Codex planner log. Already-actionable approved, in-progress, or revision work can still continue through the loop. For reviewer or checkpoint failures, inspect `.agent/logs/agent-loop-events.log` and rerun one cycle after fixing the cause.
 
 ## Avoid Paid API Usage
 

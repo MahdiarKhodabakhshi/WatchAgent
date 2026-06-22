@@ -211,15 +211,21 @@ run_cycle() {
   refuse_main_branch
 
   if ! scripts/codex-planner.sh; then
-    write_loop_event "planner_failed" "none" "Codex planner failed."
-    scripts/agent-notify.sh loop_failed || true
-    return 10
-  fi
-
-  if ! task_id="$(scripts/agent-task-state.py get-next)"; then
-    scripts/agent-notify.sh approval_needed || true
-    printf 'No approved tasks. Review .agent/approvals/pending/ and approve one with scripts/agent-approve.sh TASK-ID.\n'
-    return 2
+    write_loop_event "planner_failed" "none" "Codex planner failed; checking for existing actionable work."
+    printf 'Codex planner failed; checking for existing actionable work.\n' >&2
+    if ! task_id="$(scripts/agent-task-state.py get-next)"; then
+      write_loop_event "planner_failed_no_actionable" "none" "Codex planner failed and no actionable task exists."
+      scripts/agent-notify.sh loop_failed || true
+      return 10
+    fi
+    write_loop_event "planner_failed_actionable_exists" "$task_id" "Codex planner failed; continuing with existing actionable task."
+    printf 'Codex planner failed; continuing with existing actionable task: %s\n' "$task_id" >&2
+  else
+    if ! task_id="$(scripts/agent-task-state.py get-next)"; then
+      scripts/agent-notify.sh approval_needed || true
+      printf 'No approved tasks. Review .agent/approvals/pending/ and approve one with scripts/agent-approve.sh TASK-ID.\n'
+      return 2
+    fi
   fi
 
   printf 'Actionable task selected: %s\n' "$task_id"

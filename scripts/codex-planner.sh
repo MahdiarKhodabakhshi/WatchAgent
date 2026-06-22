@@ -69,6 +69,39 @@ append_existing_task_files() {
   done
 }
 
+append_existing_task_summary() {
+  append_section "Existing Task Summary"
+  python3 - <<'PY' >> "$context_path"
+import json
+from pathlib import Path
+
+paths = sorted(Path(".agent/tasks").glob("*.json"))
+rows = []
+for path in paths:
+    if path.name == "TASK-TEMPLATE.json":
+        continue
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        rows.append((path.stem, "unreadable", str(path), str(exc)))
+        continue
+    task_id = data.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        task_id = path.stem
+    status = data.get("status")
+    if not isinstance(status, str) or not status:
+        status = "unknown"
+    rows.append((task_id, status, str(path), ""))
+
+if not rows:
+    print("No task JSON files found.")
+else:
+    for task_id, status, path, note in rows:
+        suffix = f" ({note})" if note else ""
+        print(f"- {task_id}: {status} [{path}]{suffix}")
+PY
+}
+
 append_recent_logs() {
   append_section "Recent Agent Logs"
 
@@ -135,6 +168,7 @@ append_file_if_present ".agent/backlog.md" ".agent/backlog.md"
 append_file_if_present ".agent/handoff.md" ".agent/handoff.md"
 append_file_if_present "README.md" "README.md"
 append_file_if_present ".agent/schemas/task.schema.json" ".agent/schemas/task.schema.json"
+append_existing_task_summary
 append_existing_task_files
 append_recent_logs
 
@@ -185,9 +219,14 @@ Planning rules:
 - Do not modify app source files, frontend source files, backend source files, Docker/deployment files, package files, or project behavior.
 - Do not create, modify, print, or request secrets.
 - Keep this workflow subscription-first. Do not request or rely on API-key auth.
+- Planner output is delta-based. Emit full task objects only for new tasks.
+- Existing tasks in `.agent/tasks/` may be referenced in `recommended_order` without being re-emitted in `tasks`.
+- Do not duplicate existing tasks.
+- If no new tasks are needed, return `"tasks": []`.
+- If an existing task should remain in the recommended order, include its task ID in `recommended_order`.
 - Proposed new tasks must have status "proposed".
-- Do not re-emit an existing task_id unless you are refreshing an existing unapproved "proposed" task.
-- Never re-emit or mutate approved, in_progress, needs_revision, implemented, blocked, or rejected task ids.
+- Do not overwrite, regenerate, re-emit, or mutate approved, in_progress, needs_revision, implemented, or blocked tasks.
+- Do not re-emit rejected task ids.
 - Tasks explicitly listed under "Approved Now" in `.agent/backlog.md` may have status "approved".
 - High-risk work must be proposed unless it is explicitly approved by the human, and it must clearly require approval.
 - Create small, reviewable, one-task-per-run task objects.

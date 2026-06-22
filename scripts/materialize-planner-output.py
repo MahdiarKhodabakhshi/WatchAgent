@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,13 @@ ALLOWED_STATUSES = {
 }
 ALLOWED_RISKS = {"low", "medium", "high"}
 TASK_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+@dataclass(frozen=True)
+class ExistingTaskRecord:
+    task_id: str
+    path: Path
+    data: dict[str, Any] | None
 
 
 class ValidationFailure(Exception):
@@ -192,6 +200,80 @@ def validate_safe_task_id(task_id: Any, path: str, errors: list[str]) -> None:
         errors.append(f"{path} must not be a path traversal token: {task_id!r}.")
 
 
+def safe_existing_task_id(task_id: str, path: str) -> bool:
+    errors: list[str] = []
+    validate_safe_task_id(task_id, path, errors)
+    return not errors
+
+
+def add_existing_task_problem(problems: dict[str, list[str]], task_id: str | None, message: str) -> None:
+    if task_id is None:
+        return
+    problems.setdefault(task_id, []).append(message)
+
+
+def load_existing_task_index() -> tuple[dict[str, ExistingTaskRecord], dict[str, list[str]]]:
+    records: dict[str, ExistingTaskRecord] = {}
+    problems: dict[str, list[str]] = {}
+    task_dir = agent_path("tasks")
+
+    for path in sorted(task_dir.glob("*.json")):
+        if path.name == "TASK-TEMPLATE.json":
+            continue
+
+        fallback_task_id = path.stem
+        if not safe_existing_task_id(fallback_task_id, f"{relative(path)} filename"):
+            fallback_task_id = None
+
+        if path.is_symlink():
+            add_existing_task_problem(problems, fallback_task_id, f"Existing task is a symlink: {relative(path)}")
+            continue
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            add_existing_task_problem(
+                problems,
+                fallback_task_id,
+                f"Existing task is invalid JSON: {relative(path)} line {exc.lineno}, column {exc.colno}",
+            )
+            continue
+        except OSError as exc:
+            add_existing_task_problem(problems, fallback_task_id, f"Existing task could not be read: {relative(path)}: {exc}")
+            continue
+
+        if not isinstance(data, dict):
+            add_existing_task_problem(problems, fallback_task_id, f"Existing task is not a JSON object: {relative(path)}")
+            continue
+
+        raw_task_id = data.get("task_id")
+        if isinstance(raw_task_id, str) and raw_task_id:
+            task_id_errors: list[str] = []
+            validate_safe_task_id(raw_task_id, f"{relative(path)} task_id", task_id_errors)
+            if task_id_errors:
+                for error in task_id_errors:
+                    add_existing_task_problem(problems, fallback_task_id, error)
+                continue
+            task_id = raw_task_id
+        elif fallback_task_id is not None:
+            task_id = fallback_task_id
+        else:
+            continue
+
+        existing = records.get(task_id)
+        if existing is not None:
+            add_existing_task_problem(
+                problems,
+                task_id,
+                f"Duplicate existing task_id {task_id!r} in {relative(existing.path)} and {relative(path)}.",
+            )
+            continue
+
+        records[task_id] = ExistingTaskRecord(task_id=task_id, path=path, data=data)
+
+    return records, problems
+
+
 def validate_task(task: Any, index: int, task_schema: dict[str, Any], errors: list[str]) -> str | None:
     path = f"tasks[{index}]"
     if not isinstance(task, dict):
@@ -243,7 +325,12 @@ def validate_string_array(data: dict[str, Any], key: str, errors: list[str]) -> 
             errors.append(f"{key}[{index}] must be a string; got {json_type_name(item)}.")
 
 
-def validate_planner_output(data: dict[str, Any], task_schema: dict[str, Any]) -> list[dict[str, Any]]:
+def validate_planner_output(
+    data: dict[str, Any],
+    task_schema: dict[str, Any],
+    existing_task_ids: set[str],
+    existing_task_problems: dict[str, list[str]],
+) -> list[dict[str, Any]]:
     errors: list[str] = []
 
     missing = sorted(TOP_LEVEL_KEYS - set(data))
@@ -281,7 +368,8 @@ def validate_planner_output(data: dict[str, Any], task_schema: dict[str, Any]) -
             errors.append(f"Duplicate task_id: {task_id}")
         seen.add(task_id)
 
-    known_task_ids = set(task_ids)
+    known_task_ids = set(task_ids) | existing_task_ids
+    involved_task_ids = set(task_ids)
     recommended = data.get("recommended_order")
     if isinstance(recommended, list):
         seen_recommended: set[str] = set()
@@ -289,11 +377,15 @@ def validate_planner_output(data: dict[str, Any], task_schema: dict[str, Any]) -
             if not isinstance(task_id, str):
                 continue
             validate_safe_task_id(task_id, f"recommended_order[{index}]", errors)
+            involved_task_ids.add(task_id)
             if task_id in seen_recommended:
                 errors.append(f"recommended_order[{index}] duplicates task_id {task_id!r}.")
             seen_recommended.add(task_id)
-            if task_id not in known_task_ids:
+            if task_id not in known_task_ids and task_id not in existing_task_problems:
                 errors.append(f"recommended_order[{index}] references unknown task_id {task_id!r}.")
+
+    for task_id in sorted(involved_task_ids):
+        errors.extend(existing_task_problems.get(task_id, []))
 
     if errors:
         raise ValidationFailure(errors)
@@ -415,14 +507,6 @@ def load_existing_task(path: Path) -> dict[str, Any]:
     return data
 
 
-def can_refresh_existing_task(existing: dict[str, Any], new_task: dict[str, Any]) -> bool:
-    return (
-        existing.get("status") == "proposed"
-        and existing.get("approved_by") is None
-        and new_task.get("status") == "proposed"
-    )
-
-
 def write_task_json(path: Path, task: dict[str, Any]) -> None:
     path.write_text(json.dumps(task, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
 
@@ -445,7 +529,40 @@ def check_write_targets(plan_path: Path, tasks: list[dict[str, Any]]) -> None:
         raise ValidationFailure(errors)
 
 
-def materialize(data: dict[str, Any], tasks: list[dict[str, Any]]) -> tuple[list[Path], list[Path], list[str]]:
+def maybe_create_pending_approval(
+    task: dict[str, Any],
+    task_path: Path,
+    generated_at: str,
+    task_id_override: str | None = None,
+) -> Path | None:
+    if task.get("status") != "proposed":
+        return None
+
+    task_id = task_id_override if task_id_override is not None else task.get("task_id")
+    if not isinstance(task_id, str):
+        return None
+    approval_task = task if task.get("task_id") == task_id else {**task, "task_id": task_id}
+
+    approval_path = agent_path("approvals", "pending", f"{task_id}.md")
+    if approval_path.exists():
+        return None
+    if approval_path.is_symlink():
+        raise ValidationFailure([f"Refusing to write symlinked pending approval path: {relative(approval_path)}"])
+
+    try:
+        approval_path.write_text(approval_markdown(approval_task, task_path, generated_at), encoding="utf-8")
+    except KeyError as exc:
+        raise ValidationFailure(
+            [f"Cannot create pending approval for existing task {task_id}: missing field {exc.args[0]!r}."]
+        ) from exc
+    return approval_path
+
+
+def materialize(
+    data: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    existing_tasks: dict[str, ExistingTaskRecord],
+) -> tuple[list[Path], list[Path], list[str]]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     plan_path = agent_path("plans", f"PLAN-{timestamp}.md")
@@ -462,6 +579,9 @@ def materialize(data: dict[str, Any], tasks: list[dict[str, Any]]) -> tuple[list
     created: list[Path] = []
     updated: list[Path] = []
     skipped: list[str] = []
+    existing_task_ids_to_check: set[str] = {
+        task_id for task_id in data.get("recommended_order", []) if isinstance(task_id, str) and task_id in existing_tasks
+    }
     plan_path.write_text(plan_markdown(data, tasks, generated_at), encoding="utf-8")
     created.append(plan_path)
 
@@ -469,25 +589,28 @@ def materialize(data: dict[str, Any], tasks: list[dict[str, Any]]) -> tuple[list
         task_path = agent_path("tasks", f"{task['task_id']}.json")
         task_exists = task_path.exists()
         if task_exists:
-            existing = load_existing_task(task_path)
-            if not can_refresh_existing_task(existing, task):
-                existing_status = existing.get("status", "unknown")
-                skipped.append(f"{relative(task_path)} already exists with status {existing_status!r}; not overwritten.")
-                continue
-            write_task_json(task_path, task)
-            updated.append(task_path)
+            skipped.append(f"existing task {task['task_id']}.")
+            if task["task_id"] in existing_tasks:
+                existing_task_ids_to_check.add(task["task_id"])
+            continue
         else:
             write_task_json(task_path, task)
             created.append(task_path)
 
         if task["status"] == "proposed":
-            approval_path = agent_path("approvals", "pending", f"{task['task_id']}.md")
-            approval_exists = approval_path.exists()
-            approval_path.write_text(approval_markdown(task, task_path, generated_at), encoding="utf-8")
-            if approval_exists:
-                updated.append(approval_path)
+            approval_path = maybe_create_pending_approval(task, task_path, generated_at)
+            if approval_path is None:
+                skipped.append(f"existing approval {task['task_id']}.")
             else:
                 created.append(approval_path)
+
+    for task_id in sorted(existing_task_ids_to_check):
+        existing = existing_tasks[task_id]
+        if existing.data is None:
+            continue
+        approval_path = maybe_create_pending_approval(existing.data, existing.path, generated_at, existing.task_id)
+        if approval_path is not None:
+            created.append(approval_path)
 
     return created, updated, skipped
 
@@ -497,8 +620,9 @@ def main(argv: list[str]) -> int:
         raw = read_input(argv)
         data = load_json_document(raw)
         task_schema = load_task_schema()
-        tasks = validate_planner_output(data, task_schema)
-        created, updated, skipped = materialize(data, tasks)
+        existing_tasks, existing_task_problems = load_existing_task_index()
+        tasks = validate_planner_output(data, task_schema, set(existing_tasks), existing_task_problems)
+        created, updated, skipped = materialize(data, tasks, existing_tasks)
     except OSError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -515,11 +639,12 @@ def main(argv: list[str]) -> int:
         print(f"Updated {relative(path)}")
     for item in skipped:
         print(f"Skipped {item}")
+    pending_approvals_created = sum(1 for path in created if path.parent == AGENT_DIR / "approvals" / "pending")
     print(
         "Summary: "
         f"1 plan, {len(tasks)} task object(s), "
-        f"{len(created)} created file(s), {len(updated)} updated file(s), {len(skipped)} skipped task(s), "
-        f"{sum(1 for task in tasks if task['status'] == 'proposed')} pending approval file(s)."
+        f"{len(created)} created file(s), {len(updated)} updated file(s), {len(skipped)} skipped item(s), "
+        f"{pending_approvals_created} pending approval file(s) created."
     )
     return 0
 
