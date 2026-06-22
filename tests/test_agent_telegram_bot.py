@@ -35,6 +35,7 @@ def tmp_state(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "ROOT_DIR", root)
     monkeypatch.setattr(bot, "STATE_DIR", state)
     monkeypatch.setattr(bot, "INBOX_DIR", inbox)
+    monkeypatch.setattr(bot, "IDEAS_DIR", root / ".agent" / "ideas")
     monkeypatch.setattr(bot, "PAUSE_FILE", state / "paused")
     monkeypatch.setattr(bot, "OFFSET_FILE", state / "telegram-offset.json")
     return root
@@ -288,3 +289,87 @@ def test_read_offset_invalid_json(tmp_state):
     bot.STATE_DIR.mkdir(parents=True, exist_ok=True)
     bot.OFFSET_FILE.write_text("not json")
     assert bot.read_offset() is None
+
+
+# --------------------------------------------------------------------------- #
+# idea pipeline
+# --------------------------------------------------------------------------- #
+def test_idea_creates_sequential_ids(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    out1 = d.idea("add retry to the poller", 7)
+    out2 = d.idea("another idea", 7)
+    assert "IDEA-1" in out1
+    assert "IDEA-2" in out2
+    first = bot.read_idea("IDEA-1")
+    assert first["state"] == "new"
+    assert first["chat_id"] == 7
+    assert first["text"] == "add retry to the poller"
+
+
+def test_idea_requires_text(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    assert "Usage" in d.idea("   ", 1)
+
+
+def test_confirm_latest_planned(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    d.idea("idea one", 1)
+    data = bot.read_idea("IDEA-1")
+    data["state"] = "planned"
+    bot.write_idea(data)
+    out = d.confirm("", 1)
+    assert "IDEA-1" in out
+    assert bot.read_idea("IDEA-1")["state"] == "approved"
+
+
+def test_confirm_rejects_when_not_planned(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    d.idea("idea one", 1)  # state new, not planned
+    assert "No idea" in d.confirm("", 1)
+
+
+def test_confirm_explicit_id_validates(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    assert "not found" in d.confirm("IDEA-99", 1).lower()
+    assert "Invalid idea id" in d.confirm("IDEA-x; rm", 1)
+
+
+def test_cancel_marks_rejected(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    d.idea("idea one", 1)
+    d.cancel("IDEA-1", 1)
+    assert bot.read_idea("IDEA-1")["state"] == "rejected"
+
+
+def test_continue_clears_pause(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    d.idea("idea one", 1)
+    data = bot.read_idea("IDEA-1")
+    data.update(state="approved", paused=True, resume_after="2026-01-01T00:00:00Z")
+    bot.write_idea(data)
+    out = d.cont("", 1)
+    assert "IDEA-1" in out
+    resumed = bot.read_idea("IDEA-1")
+    assert resumed["paused"] is False
+    assert "resume_after" not in resumed
+
+
+def test_continue_when_nothing_paused(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    d.idea("idea one", 1)  # not paused
+    assert "not" in d.cont("", 1).lower()
+
+
+def test_ideas_lists_active(tmp_state):
+    d = bot.Dispatcher(runner=FakeRunner())
+    d.idea("first idea", 1)
+    d.idea("second idea", 1)
+    d.cancel("IDEA-1", 1)
+    out = d.ideas("", 1)
+    assert "IDEA-2" in out
+    assert "IDEA-1" not in out  # cancelled is hidden
+
+
+def test_idea_commands_registered():
+    for cmd in ("/idea", "/confirm", "/cancel", "/continue", "/ideas"):
+        assert cmd in bot.COMMANDS

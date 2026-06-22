@@ -338,6 +338,48 @@ the planner context on the next planning run. Both `.agent/inbox/` and
 `.agent/state/` are gitignored runtime directories; clear processed inbox files
 manually when they are no longer relevant.
 
+## Claude Idea Pipeline (Claude-only, interactive)
+
+Separate from the Codex plan/implement/review loop, this pipeline lets you turn
+an idea into reviewed work entirely through Claude Code, with you confirming the
+plan in the middle. It never uses Codex.
+
+Flow:
+
+1. You send `/idea <your idea>` on Telegram. The bot files it as
+   `.agent/ideas/IDEA-<n>.json` (state `new`).
+2. `scripts/idea-worker.py` picks it up and runs `scripts/claude-planner.sh`
+   (Claude, read-only) to produce a short plan, then sends the plan to you
+   (state `planned`).
+3. You reply `/confirm IDEA-<n>` (or just `/confirm` for the latest). The worker
+   runs `scripts/claude-idea-implement.sh` (Claude) to build it (state
+   `approved` → `done`), commits on the work branch, and messages you a summary.
+4. `/cancel IDEA-<n>` drops an idea; `/ideas` lists active ones.
+
+The bot only edits the idea files; the worker does the Claude work, so the bot
+never blocks. Run the worker continuously:
+
+```bash
+scripts/idea-worker.py                 # forever, polls every 20s
+scripts/idea-worker.py --once          # advance one idea and exit
+```
+
+### Usage-limit handling and /continue
+
+If Claude hits a usage/session limit mid-plan or mid-implementation, the worker
+checkpoints the work, estimates when the next session starts, and messages you,
+e.g. "paused (usage limit) … next session ~14:30 local (in ~2h 10m). Send
+`/continue IDEA-<n>`". The estimate is parsed from Claude's output when possible
+and otherwise falls back to a 5-hour window (`CLAUDE_USAGE_WINDOW_HOURS`).
+
+`/continue` clears the pause and the worker resumes the **same Claude session**
+(`--resume <session id>`), falling back to a fresh run with the plan and handoff
+if the session is gone. `/continue` works at any time — if the limit has not
+actually reset, the idea simply re-pauses with an updated estimate. Set
+`IDEA_AUTO_CONTINUE=1` to let the worker auto-resume once the estimate passes
+instead of waiting for `/continue`. A `max turns` stop pauses the same way but
+needs no wait — just `/continue`.
+
 ## Always-On Operation
 
 The loop and the Telegram bot are both long-running processes that nothing starts

@@ -1,0 +1,22 @@
+[Unit]
+Description=WatchAgent Claude-only idea worker (idea -> plan -> confirm -> implement)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/scripts/idea-worker.py --sleep-seconds 20
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+# Larger turn budget so a confirmed idea finishes in one session when possible.
+Environment=CLAUDE_MAX_TURNS=40
+# Set to 1 to auto-resume paused ideas once their estimated reset time passes.
+# Left unset so resuming is driven by the human /continue command.
+# Environment=IDEA_AUTO_CONTINUE=1
+# Subscription-only workflow: never set ANTHROPIC_API_KEY here. Claude reads its
+# subscription credentials from $HOME.
+
+[Install]
+WantedBy=default.target

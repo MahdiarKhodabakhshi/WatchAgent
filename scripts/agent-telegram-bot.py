@@ -46,12 +46,14 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT_DIR / "scripts"
 STATE_DIR = ROOT_DIR / ".agent" / "state"
 INBOX_DIR = ROOT_DIR / ".agent" / "inbox"
+IDEAS_DIR = ROOT_DIR / ".agent" / "ideas"
 LOG_DIR = ROOT_DIR / ".agent" / "logs"
 PAUSE_FILE = STATE_DIR / "paused"
 OFFSET_FILE = STATE_DIR / "telegram-offset.json"
 TELEGRAM_ENV_FILE = ROOT_DIR / ".agent" / "telegram.env"
 
 SAFE_TASK_ID_RE = re.compile(r"^TASK-[A-Za-z0-9._-]+$")
+SAFE_IDEA_ID_RE = re.compile(r"^IDEA-[0-9]+$")
 MAX_REQUEST_CHARS = 4000
 
 logger = logging.getLogger("agent-telegram-bot")
@@ -220,6 +222,59 @@ def _utc_now() -> str:
 CommandRunner = Callable[[list[str]], tuple[int, str]]
 
 
+# --------------------------------------------------------------------------- #
+# Idea pipeline state (Claude-only idea -> plan -> confirm -> implement)
+# Each idea is a JSON file .agent/ideas/IDEA-<n>.json. The bot only flips fields;
+# scripts/idea-worker.py runs Claude and advances the work.
+# --------------------------------------------------------------------------- #
+def idea_path(idea_id: str) -> Path:
+    return IDEAS_DIR / f"{idea_id}.json"
+
+
+def read_idea(idea_id: str) -> dict[str, Any] | None:
+    path = idea_path(idea_id)
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_idea(data: dict[str, Any]) -> None:
+    IDEAS_DIR.mkdir(parents=True, exist_ok=True)
+    data["updated_at"] = _utc_now()
+    path = idea_path(data["id"])
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def list_ideas() -> list[dict[str, Any]]:
+    if not IDEAS_DIR.is_dir():
+        return []
+    ideas: list[dict[str, Any]] = []
+    for path in IDEAS_DIR.glob("IDEA-*.json"):
+        if path.is_symlink():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and SAFE_IDEA_ID_RE.fullmatch(str(data.get("id", ""))):
+            ideas.append(data)
+    ideas.sort(key=lambda d: int(str(d["id"]).split("-", 1)[1]))
+    return ideas
+
+
+def next_idea_id() -> str:
+    highest = 0
+    for idea in list_ideas():
+        highest = max(highest, int(str(idea["id"]).split("-", 1)[1]))
+    return f"IDEA-{highest + 1}"
+
+
 def default_runner(args: list[str]) -> tuple[int, str]:
     """Run a workflow script and capture combined output."""
     completed = subprocess.run(
@@ -360,6 +415,105 @@ class Dispatcher:
     def help(self, _args: str, _chat_id: int) -> str:
         return COMMAND_LIST
 
+    # -- idea pipeline (Claude-only) ------------------------------------- #
+    @staticmethod
+    def _valid_idea_id(idea_id: str) -> bool:
+        return bool(SAFE_IDEA_ID_RE.fullmatch(idea_id))
+
+    def _resolve_idea(self, arg: str, want_states: set[str]) -> tuple[str | None, str]:
+        """Resolve an idea id from an explicit arg, or the latest in want_states."""
+        token = arg.split()[0] if arg.split() else ""
+        if token:
+            if not self._valid_idea_id(token):
+                return None, f"Invalid idea id: {token}"
+            if read_idea(token) is None:
+                return None, f"Idea not found: {token}"
+            return token, ""
+        candidates = [i for i in list_ideas() if i.get("state") in want_states]
+        if not candidates:
+            return None, f"No idea is currently in state: {', '.join(sorted(want_states))}."
+        return str(candidates[-1]["id"]), ""
+
+    def idea(self, args: str, chat_id: int) -> str:
+        text = args.strip()
+        if not text:
+            return "Usage: /idea your idea in plain words"
+        idea_id = next_idea_id()
+        write_idea(
+            {
+                "id": idea_id,
+                "text": text[:MAX_REQUEST_CHARS],
+                "state": "new",
+                "paused": False,
+                "chat_id": chat_id,
+                "created_at": _utc_now(),
+            }
+        )
+        return f"Got it — queued as {idea_id}. Planning it now; I'll send you the plan to confirm."
+
+    def confirm(self, args: str, _chat_id: int) -> str:
+        idea_id, err = self._resolve_idea(args, {"planned"})
+        if err:
+            return err
+        data = read_idea(idea_id)
+        if data is None:
+            return f"Idea not found: {idea_id}"
+        if data.get("state") != "planned":
+            return f"{idea_id} is {data.get('state')}, not awaiting confirmation."
+        data["state"] = "approved"
+        data["resume"] = False
+        data["paused"] = False
+        write_idea(data)
+        return f"Confirmed {idea_id}. Implementing it now; I'll report when it's done."
+
+    def cancel(self, args: str, _chat_id: int) -> str:
+        idea_id, err = self._resolve_idea(args, {"new", "planned", "approved"})
+        if err:
+            return err
+        data = read_idea(idea_id)
+        if data is None:
+            return f"Idea not found: {idea_id}"
+        if data.get("state") in {"done", "rejected"}:
+            return f"{idea_id} is already {data.get('state')}."
+        data["state"] = "rejected"
+        data["paused"] = False
+        write_idea(data)
+        return f"Cancelled {idea_id}."
+
+    def cont(self, args: str, _chat_id: int) -> str:
+        idea_id, err = self._resolve_idea(args, {"new", "approved"})
+        if err:
+            # Most often the user means "resume the paused one".
+            paused = [i for i in list_ideas() if i.get("paused")]
+            if not args.split() and paused:
+                idea_id = str(paused[-1]["id"])
+            else:
+                return err
+        data = read_idea(idea_id)
+        if data is None:
+            return f"Idea not found: {idea_id}"
+        if not data.get("paused"):
+            return f"{idea_id} is not paused (state: {data.get('state')})."
+        data["paused"] = False
+        data.pop("resume_after", None)
+        write_idea(data)
+        return f"Resuming {idea_id} in a new session now."
+
+    def ideas(self, _args: str, _chat_id: int) -> str:
+        items = list_ideas()
+        if not items:
+            return "No ideas yet. Send one with /idea your idea."
+        lines = ["Ideas:"]
+        for i in items:
+            if i.get("state") in {"done", "rejected"}:
+                continue
+            flag = " (paused)" if i.get("paused") else ""
+            text = str(i.get("text", ""))[:48]
+            lines.append(f"{i['id']}: {i.get('state')}{flag} — {text}")
+        if len(lines) == 1:
+            return "No active ideas. Send one with /idea your idea."
+        return "\n".join(lines)
+
 
 COMMANDS: dict[str, str] = {
     "/status": "status",
@@ -371,6 +525,11 @@ COMMANDS: dict[str, str] = {
     "/goal": "goal",
     "/details": "details",
     "/help": "help",
+    "/idea": "idea",
+    "/confirm": "confirm",
+    "/cancel": "cancel",
+    "/continue": "cont",
+    "/ideas": "ideas",
 }
 
 COMMAND_LIST = (
@@ -383,7 +542,13 @@ COMMAND_LIST = (
     "/task your request\n"
     "/goal your high-level direction\n"
     "/details TASK-ID\n"
-    "/help"
+    "/help\n"
+    "\nClaude idea pipeline:\n"
+    "/idea your idea — plan it and send back for confirmation\n"
+    "/confirm [IDEA-n] — approve the plan; implement it\n"
+    "/cancel [IDEA-n] — drop an idea\n"
+    "/continue [IDEA-n] — resume after a usage limit\n"
+    "/ideas — list active ideas"
 )
 
 HELP_TEXT = "Unknown command.\n" + COMMAND_LIST

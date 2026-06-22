@@ -4,8 +4,14 @@ These user units keep the two long-running pieces of the agent system alive and
 restart them on crash or reboot:
 
 - `watchagent-telegram.service` — the Telegram inbound command bot.
-- `watchagent-loop.service` — the autonomous plan/implement/review loop
-  (`scripts/agent-loop.sh --forever`).
+- `watchagent-loop.service` — the autonomous Codex+Claude plan/implement/review
+  loop (`scripts/agent-loop.sh --forever`).
+- `watchagent-idea-worker.service` — the Claude-only idea pipeline worker
+  (`scripts/idea-worker.py`), which turns Telegram `/idea` requests into a plan
+  for you to `/confirm`, then implements them. Needs the Telegram bot running.
+
+You can run any subset. For the interactive Claude-only idea flow you only need
+`watchagent-telegram` + `watchagent-idea-worker`; the Codex loop is independent.
 
 The unit files contain a `__REPO_DIR__` placeholder. The install commands below
 substitute it with your real repository path.
@@ -25,14 +31,15 @@ substitute it with your real repository path.
 cd /path/to/watchagent           # your repo
 mkdir -p ~/.config/systemd/user
 
-for unit in watchagent-telegram watchagent-loop; do
+for unit in watchagent-telegram watchagent-loop watchagent-idea-worker; do
   sed "s#__REPO_DIR__#$PWD#g" "deploy/systemd/$unit.service" \
     > ~/.config/systemd/user/"$unit.service"
 done
 
 systemctl --user daemon-reload
 systemctl --user enable --now watchagent-telegram.service
-systemctl --user enable --now watchagent-loop.service
+systemctl --user enable --now watchagent-idea-worker.service
+systemctl --user enable --now watchagent-loop.service   # optional: Codex autonomous loop
 
 # Keep the services running after you log out / across reboots:
 sudo loginctl enable-linger "$USER"
