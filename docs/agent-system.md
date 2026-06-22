@@ -270,6 +270,16 @@ Supported reasons are `approval_needed`, `implementation_blocked`, `review_ready
 
 GitHub issue creation is best-effort. If `gh` is authenticated and a remote exists, approval and review notifications can create or comment on issues labeled `agent/approval-needed` or `agent/review-needed`. GitHub is not required for success.
 
+Outbound Telegram is also best-effort. If `scripts/telegram-send.sh` is present
+and `.agent/telegram.env` (or the `TELEGRAM_*` environment) is configured, every
+notification is pushed to the allowlisted chat(s) with a short summary: reason,
+task id and status, branch, whether approval or final review is needed, the
+latest commit subject, the files it changed, and the suggested next command.
+Accepted-task (`review_ready`) messages also include the Codex review summary.
+Delivery failures never break the loop. This is what tells you on your phone when
+a run finishes, stalls, or needs approval. Run it manually with
+`scripts/telegram-send.sh "message"`.
+
 ## Telegram Control Channel
 
 `scripts/agent-telegram-bot.py` is an optional remote control surface. It

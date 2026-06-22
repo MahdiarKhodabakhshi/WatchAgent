@@ -239,4 +239,64 @@ if [ -n "$github_label" ] && command -v gh >/dev/null 2>&1 && git remote >/dev/n
   fi
 fi
 
+latest_review_summary() {
+  local task_id="$1"
+  [ "$task_id" != "none" ] || return 0
+  python3 - "$task_id" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+task_id = sys.argv[1]
+reviews = sorted(Path(".agent/reviews").glob(f"REVIEW-{task_id}-*.json"))
+if not reviews:
+    raise SystemExit(0)
+try:
+    data = json.loads(reviews[-1].read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+summary = data.get("summary")
+if isinstance(summary, str) and summary.strip():
+    print(summary.strip()[:300])
+PY
+}
+
+build_telegram_message() {
+  local icon
+  case "$reason" in
+    approval_needed) icon="[approval]" ;;
+    review_ready) icon="[done]" ;;
+    implementation_blocked) icon="[blocked]" ;;
+    usage_limit) icon="[paused/limit]" ;;
+    auth_failed) icon="[auth]" ;;
+    loop_failed) icon="[failed]" ;;
+    max_revisions_reached) icon="[max-revisions]" ;;
+    *) icon="[info]" ;;
+  esac
+
+  printf 'WatchAgent %s %s\n' "$icon" "$reason"
+  printf 'Task: %s (%s)\n' "$current_task" "$task_status"
+  printf 'Branch: %s\n' "$branch"
+  [ "$approval_needed" = "yes" ] && printf 'Approval needed.\n'
+  [ "$final_review_needed" = "yes" ] && printf 'Final review/merge needed.\n'
+
+  if [ "$reason" = "review_ready" ]; then
+    local summary
+    summary="$(latest_review_summary "$current_task")"
+    [ -n "$summary" ] && printf 'Review: %s\n' "$summary"
+  fi
+
+  if git rev-parse HEAD >/dev/null 2>&1; then
+    printf '\nLatest commit: %s\n' "$(git log -1 --pretty=%s 2>/dev/null)"
+    git show --stat --format='' HEAD 2>/dev/null | sed '/^$/d' | head -n 8
+  fi
+
+  printf '\nNext: %s' "$(next_command)"
+}
+
+# Best-effort push to Telegram. Never breaks the notification flow.
+if [ -x scripts/telegram-send.sh ]; then
+  build_telegram_message | scripts/telegram-send.sh || true
+fi
+
 printf 'Wrote notification: %s\n' "$notification_path"
