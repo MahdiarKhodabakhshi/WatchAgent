@@ -264,6 +264,54 @@ def test_cold_stress_cold_start_does_not_fire() -> None:
     assert detector.detect(_ctx(current, _history(count=11))) == []
 
 
+def test_heat_stress_missing_dew_point_does_not_fire() -> None:
+    detector = HeatStressDetector()
+    current = _reading(id=100, temperature_2m=31.0, dew_point_2m=None)
+
+    assert detector.detect(_ctx(current, _history())) == []
+
+
+def test_cold_stress_missing_wind_speed_does_not_fire() -> None:
+    detector = ColdStressDetector()
+    current = _reading(id=100, temperature_2m=-20.0, wind_speed_10m=None)
+
+    assert detector.detect(_ctx(current, _history())) == []
+
+
+def test_cold_stress_calm_wind_below_chill_floor_does_not_fire() -> None:
+    detector = ColdStressDetector()
+    current = _reading(id=100, temperature_2m=-30.0, wind_speed_10m=3.0)
+
+    assert detector.detect(_ctx(current, _history())) == []
+
+
+def test_pressure_plunge_falls_back_to_surface_pressure() -> None:
+    detector = PressurePlungeDetector()
+    current = _reading(
+        id=100,
+        pressure_msl=None,
+        surface_pressure=1000.0,
+        wind_gusts_10m=45.0,
+    )
+    history = _history(
+        {
+            -3: {"surface_pressure": 1007.0, "wind_gusts_10m": 35.0},
+            -6: {"surface_pressure": 1010.0, "wind_gusts_10m": 30.0},
+        },
+        pressure_msl=None,
+        surface_pressure=1010.0,
+        wind_gusts_10m=30.0,
+    )
+
+    events = detector.detect(_ctx(current, history))
+
+    assert len(events) == 1
+    assert events[0].event_type == "pressure_plunge"
+    assert events[0].metric == "surface_pressure"
+    assert events[0].signal_values["pressure_fall_hpa"] == 7.0
+    assert events[0].signal_values["wind_rise_kmh"] == 10.0
+
+
 def test_forecast_bust_fires_on_error_over_rolling_mae() -> None:
     detector = ForecastBustDetector()
     current = _reading(id=100, temperature_2m=30.0)

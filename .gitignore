@@ -12,3 +12,11 @@ build/
 *.egg-info/
 frontend/node_modules/
 frontend/dist/
+
+# Local two-agent system runtime files
+.agent/logs/*.log
+.agent/notifications/*.md
+.agent/tmp/
+.agent/state/
+.agent/inbox/telegram/*.json
+.env.agent
