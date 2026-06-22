@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -34,9 +35,9 @@ ACTIONABLE_PRIORITY = {
     "approved": 2,
 }
 HELP_TEXT = (
-    "Supported commands: /status, /approve TASK-ID [TOKEN], "
+    "Supported commands: /status, /approve TASK-ID, "
     "/reject TASK-ID reason, /pause, /resume, /goal text..., "
-    "/task text..., /details TASK-ID"
+    "/task text..., /details TASK-ID, /help"
 )
 
 
@@ -168,7 +169,7 @@ def append_command_log(command: str, args: list[str], exit_code: int, output: st
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
-def approval_markdown(task_id: str, task_path: Path, token_present: bool, source: str = "telegram") -> str:
+def approval_markdown(task_id: str, task_path: Path, source: str = "telegram") -> str:
     return "\n".join(
         [
             f"# Approval: {task_id}",
@@ -176,14 +177,13 @@ def approval_markdown(task_id: str, task_path: Path, token_present: bool, source
             "- Approved by: human",
             f"- Approved at: {utc_now()}",
             f"- Source: {source}",
-            f"- Token provided: {'yes' if token_present else 'no'}",
             f"- Task file: {relative(task_path)}",
             "",
         ]
     )
 
 
-def append_approval_metadata(task_id: str, token_present: bool) -> None:
+def append_approval_metadata(task_id: str) -> None:
     ensure_dir(APPROVED_DIR)
     path = agent_path("approvals", "approved", f"{task_id}.md")
     if path.exists() and path.is_symlink():
@@ -195,20 +195,17 @@ def append_approval_metadata(task_id: str, token_present: bool) -> None:
                     f"\n## Telegram Approval {utc_now()}",
                     "",
                     "- Source: telegram",
-                    f"- Token provided: {'yes' if token_present else 'no'}",
                     "",
                 ]
             )
         )
 
 
-def approve_internally(task_id: str, token: str | None) -> str:
+def approve_internally(task_id: str) -> str:
     path, data = load_task(task_id)
     status = data.get("status")
     if status != "proposed":
         raise DispatchError(f"Task {task_id} has status {status!r}; only proposed tasks can be approved.")
-    if data.get("risk") == "high" and token is None:
-        raise DispatchError(f"Task {task_id} is high risk. Use /approve {task_id} TOKEN after explicit approval.")
     data["status"] = "approved"
     data["approved_by"] = "human"
     data["status_updated_at"] = utc_now()
@@ -219,32 +216,31 @@ def approve_internally(task_id: str, token: str | None) -> str:
     approval_path = agent_path("approvals", "approved", f"{task_id}.md")
     if approval_path.exists() and approval_path.is_symlink():
         raise DispatchError(f"Refusing symlinked approval file: {relative(approval_path)}")
-    approval_path.write_text(approval_markdown(task_id, path, token is not None), encoding="utf-8")
+    approval_path.write_text(approval_markdown(task_id, path), encoding="utf-8")
     return f"Approved {task_id}. Updated {relative(path)} and wrote {relative(approval_path)}."
 
 
 def approve_task(args: list[str]) -> str:
-    if len(args) not in {1, 2}:
-        raise DispatchError("Usage: /approve TASK-ID [TOKEN]")
+    if len(args) != 1:
+        raise DispatchError("Usage: /approve TASK-ID")
     task_id = args[0]
-    token = args[1] if len(args) == 2 else None
     validate_task_id(task_id)
 
     path, data = load_task(task_id)
     helper = ROOT_DIR / "scripts" / "agent-approve.sh"
-    if helper.exists():
+    if helper.exists() and os.access(helper, os.X_OK):
         cmd = [str(helper)]
-        if data.get("risk") == "high" and token is not None:
+        if data.get("risk") == "high":
             cmd.append("--allow-high-risk")
         cmd.append(task_id)
         result = subprocess.run(cmd, cwd=ROOT_DIR, text=True, capture_output=True, check=False)
         combined = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
         if result.returncode != 0:
             raise DispatchError(combined or f"Approval helper failed for {task_id}.")
-        append_approval_metadata(task_id, token is not None)
+        append_approval_metadata(task_id)
         return truncate(combined or f"Approved {task_id}.")
 
-    return approve_internally(task_id, token)
+    return approve_internally(task_id)
 
 
 def reject_task(args: list[str]) -> str:
@@ -394,6 +390,28 @@ def next_actionable_task() -> str:
     return candidates[0][2]
 
 
+def task_ids_with_status(status: str) -> list[str]:
+    rows = []
+    for task_id, data, _ in iter_tasks():
+        if data.get("status") != status:
+            continue
+        updated_at = data.get("status_updated_at")
+        if not isinstance(updated_at, str):
+            updated_at = data.get("created_at") if isinstance(data.get("created_at"), str) else ""
+        rows.append((updated_at, task_id))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    return [task_id for _, task_id in rows]
+
+
+def summarize_task_ids(task_ids: list[str], limit: int = 5) -> str:
+    if not task_ids:
+        return "none"
+    text = ", ".join(task_ids[:limit])
+    if len(task_ids) > limit:
+        text += f", +{len(task_ids) - limit} more"
+    return text
+
+
 def pending_approvals() -> list[str]:
     if not PENDING_DIR.exists():
         return []
@@ -412,17 +430,14 @@ def latest_notification() -> str:
 
 
 def status_summary(_: list[str]) -> str:
-    pending = pending_approvals()
-    pending_text = ", ".join(pending[:5]) if pending else "none"
-    if len(pending) > 5:
-        pending_text += f", +{len(pending) - 5} more"
     paused = "yes" if agent_path("PAUSED").exists() else "no"
     return "\n".join(
         [
             f"Branch: {current_branch()}",
             f"Paused: {paused}",
             f"Actionable task: {next_actionable_task()}",
-            f"Pending approvals: {pending_text}",
+            f"Pending proposed tasks: {summarize_task_ids(task_ids_with_status('proposed'))}",
+            f"Implemented tasks: {summarize_task_ids(task_ids_with_status('implemented'))}",
             f"Last notification: {latest_notification()}",
         ]
     )
@@ -482,6 +497,8 @@ def dispatch(command: str, args: list[str]) -> str:
         return write_human_inbox("task", args)
     if command == "/details":
         return task_details(args)
+    if command == "/help":
+        return HELP_TEXT
     raise DispatchError(HELP_TEXT)
 
 

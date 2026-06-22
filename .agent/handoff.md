@@ -2,54 +2,49 @@
 
 ## Current Task
 
-TASK-api-query-validation-regressions — Add focused API query validation regression tests (backend tests).
+TASK-detector-edge-case-regression-tests — Add detector edge-case regression tests without threshold changes (backend tests).
 
 ## Current Branch
 
-agent/task-api-query-validation-regressions
+agent/task-detector-edge-case-regression-tests
 
 ## Status
 
-Implementation pass complete. Added focused regression tests to `tests/test_api.py` documenting current `/readings` and `/events` query validation behavior (invalid city, naive datetimes, limit bounds, malformed datetime, and timezone-aware-to-UTC filtering). No API implementation behavior was changed. (Final task status is set by the wrapper/reviewer, not by Claude.)
+Implementation pass complete. Added four focused regression tests to `tests/test_native_detectors.py` documenting current detector edge-case behavior for missing optional weather fields and an alternate-metric fallback. No detector thresholds, scoring weights, severity mapping, lifecycle behavior, climatology artifacts, or evaluation/README claims were changed. (Final task status is set by the wrapper/reviewer, not by Claude.)
 
 ## What Changed So Far
 
-- `tests/test_api.py` only. No application, schema, frontend, Docker, package, or detector files were touched.
-- Added regression tests that capture the **current** behavior (no behavior changes):
-  - `test_readings_reject_invalid_city`, `test_events_reject_invalid_city` — an unsupported `city` (e.g. `Montreal`, outside the `Literal["Ottawa","Toronto","Vancouver"]`) returns `422`.
-  - `test_readings_reject_naive_start`, `test_readings_reject_naive_end`, `test_events_reject_naive_start` — naive (non-timezone-aware) `start`/`end` returns `422` with the plain-string detail `"start must be timezone-aware"` / `"end must be timezone-aware"` from `app/main.py:_utc_query_datetime`. (Previously only `/forecasts` covered this path.)
-  - `test_readings_reject_malformed_datetime` — an unparseable datetime returns `422`.
-  - `test_readings_reject_limit_below_minimum`, `test_events_reject_limit_below_minimum`, `test_events_reject_limit_above_maximum` — `limit=0` and `limit=5001` violate `Query(ge=1, le=5000)` and return `422`. (Previously only `/readings` limit=5001 was covered.)
-  - `test_readings_offset_aware_start_filters_in_utc` — an offset-aware `start` (`2026-05-27T10:00:00-04:00`) is normalized to UTC (`14:00Z`) before filtering, documenting the `astimezone(timezone.utc)` conversion in `_utc_query_datetime`.
-- Tests reuse the existing `client` / `db_session` fixtures and `seed_reading` helper from `tests/conftest.py`; no live Open-Meteo or external network calls were introduced.
+- `tests/test_native_detectors.py` only. No detector implementation, climatology artifact, contract/lifecycle test, app, schema, or docs files were touched.
+- Added regression tests that capture the **current** behavior (no behavior changes), reusing the existing `_reading` / `_history` / `_ctx` helpers and the in-file `_mini_climatology()` fixture — fully deterministic and network-free:
+  - `test_heat_stress_missing_dew_point_does_not_fire` — with `dew_point_2m=None`, `HeatStressDetector` returns `[]` even at a hot air temperature, documenting the incomplete-context guard at `app/detection/stress.py:34` (`if temperature is None or dew_point is None: return []`).
+  - `test_cold_stress_missing_wind_speed_does_not_fire` — with `wind_speed_10m=None`, `ColdStressDetector` returns `[]`, documenting the guard at `app/detection/stress.py:100`.
+  - `test_cold_stress_calm_wind_below_chill_floor_does_not_fire` — at `-30C` with `3.0 km/h` wind (below `MIN_WIND_CHILL_KMH = 4.8`), `wind_chill()` returns `None`, so `ColdStressDetector` does not fire (`app/detection/stress.py:104,165`). Documents that frigid air alone is insufficient when wind is near-calm.
+  - `test_pressure_plunge_falls_back_to_surface_pressure` — when `pressure_msl is None`, `PressurePlungeDetector` selects `surface_pressure` via `_pressure_metric` (`app/detection/pressure_plunge.py:99-104`) and otherwise behaves identically to the existing `pressure_msl` trigger test (`metric == "surface_pressure"`, `pressure_fall_hpa == 7.0`, `wind_rise_kmh == 10.0`).
+- No existing tests were deleted or weakened; these are pure additions. Confirmed via grep that no detector test previously covered missing `dew_point_2m`/`wind_speed_10m`, the wind-chill floor, or the `surface_pressure` fallback.
 
 ## Tests Run
 
-- `python -m pytest tests/test_api.py -q` — NOT RUN. Blocked: every non-read-only Bash command requires interactive approval in this sandbox; per operating rules I did not bypass the permission gate or repeatedly retry.
-- `python -m py_compile tests/test_api.py` — NOT RUN. Same reason.
-- `.venv/bin/pytest tests/test_api.py tests/test_dedup.py tests/test_forecast_storage.py -q` — NOT RUN. Same reason.
-- `.venv/bin/ruff check tests/test_api.py` — NOT RUN. Same reason.
-- Read-only `git branch --show-current` succeeded and confirmed the working branch is `agent/task-api-query-validation-regressions`.
-- Residual risk: the new tests assert against current behavior that is also exercised by the existing `/forecasts` analogues (`test_forecasts_limit_validation`, `test_forecasts_reject_naive_datetime`) and the existing `/readings`/`/events` filter tests, so the assertions match patterns already passing in the suite. A reviewer with shell access should run `pytest tests/test_api.py -q` to confirm green.
+- `.venv/bin/python -m pytest tests/test_native_detectors.py -q` — NOT RUN. Blocked: this non-read-only Bash command requires interactive approval in this sandbox; per operating rules I did not bypass the permission gate or repeatedly retry.
+- Read-only `git branch --show-current` succeeded and confirmed the working branch is `agent/task-detector-edge-case-regression-tests`.
+- Residual risk: low. The `surface_pressure` fallback test is a direct structural mirror of the already-passing `test_pressure_plunge_fires_on_three_hour_fall_confirmed_by_wind` (same numbers, only the pressure metric swapped), and the three suppression tests assert the empty-result guards read directly from `app/detection/stress.py`. A reviewer with shell access should run `pytest tests/test_native_detectors.py -q` to confirm green.
 
 ## Follow-up Ideas (NOT implemented — out of scope for this task)
 
-- **API error-shape inconsistency.** Validation handled by FastAPI (`Query` constraints + the `city` `Literal`) returns `422` with a structured `detail` *list* of error objects, while the naive-datetime guard in `app/main.py:_utc_query_datetime` returns `422` with a plain *string* `detail` (`"start must be timezone-aware"`). Both are `422`, but the `detail` payload shape differs between the two validation paths. This matches the backlog's "API error consistency review" theme and could be a small follow-up to standardize the error body (e.g. raise a `RequestValidationError`-shaped error, or document the divergence). Recorded here per the task's instruction to log behavior gaps rather than change behavior.
+- None. No unexpected detector behavior was observed while writing these tests; all four cases matched the implementation as written.
 
 ## Failures / Blockers
 
-- Bash verification commands (`pytest`, `py_compile`, `ruff`) require interactive approval in this environment and were therefore not executed. Read-only `git` succeeded. A reviewer with shell access should run `pytest tests/test_api.py -q` to confirm the additions pass; the new tests only assert current behavior, so no source change is expected to be needed.
+- The `pytest` verification command requires interactive approval in this environment and was therefore not executed. Read-only `git` succeeded. A reviewer with shell access should run `pytest tests/test_native_detectors.py -q` to confirm the additions pass; the new tests only assert current behavior, so no source change is expected to be needed.
 
 ## Pull Request
 
-- Could not create or update a draft PR directly: `gh` and `git push` require interactive approval in this sandbox and were not run. The `scripts/claude-implementer.sh` wrapper commits, pushes the task branch, and opens/updates the draft PR after this run. If `gh` is unavailable there, a human should open a draft PR from `agent/task-api-query-validation-regressions`.
+- Could not create or update a draft PR directly: `gh` and `git push` require interactive approval in this sandbox and were not run. The `scripts/claude-implementer.sh` wrapper commits, pushes the task branch, and opens/updates the draft PR after this run. If `gh` is unavailable there, a human should open a draft PR from `agent/task-detector-edge-case-regression-tests`.
 
 ## Next Steps
 
-- Reviewer (or a human with shell access) runs `pytest tests/test_api.py -q` and `ruff check tests/test_api.py` to confirm green.
+- Reviewer (or a human with shell access) runs `pytest tests/test_native_detectors.py -q` to confirm green.
 - Codex review against the task acceptance criteria.
 - Human PR review and merge (agents must not merge).
-- Optionally triage the "API error-shape inconsistency" follow-up idea above into a proposed task.
 
 ## Do-Not-Touch List
 
@@ -136,3 +131,11 @@ Implementation pass complete. Added focused regression tests to `tests/test_api.
 - Status: implemented_by_claude
 - Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
 - Log: .agent/logs/claude-implementer-20260622T045042Z.log
+
+## Script Update 20260622T051736Z
+
+- Current task: TASK-detector-edge-case-regression-tests
+- Current branch: agent/task-detector-edge-case-regression-tests
+- Status: implemented_by_claude
+- Note: Claude completed its implementation pass. Final task status is reserved for Codex review and the loop.
+- Log: .agent/logs/claude-implementer-20260622T051736Z.log

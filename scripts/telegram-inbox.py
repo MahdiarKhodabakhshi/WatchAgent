@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -17,11 +18,11 @@ AGENT_DIR = ROOT_DIR / ".agent"
 TELEGRAM_INBOX_DIR = AGENT_DIR / "inbox" / "telegram"
 STATE_DIR = AGENT_DIR / "state"
 OFFSET_PATH = STATE_DIR / "telegram-offset.json"
-SUPPORTED_COMMANDS = {"/status", "/approve", "/reject", "/pause", "/resume", "/goal", "/task", "/details"}
+SUPPORTED_COMMANDS = {"/status", "/approve", "/reject", "/pause", "/resume", "/goal", "/task", "/details", "/help"}
 HELP_TEXT = (
-    "Supported commands: /status, /approve TASK-ID [TOKEN], "
+    "Supported commands: /status, /approve TASK-ID, "
     "/reject TASK-ID reason, /pause, /resume, /goal text..., "
-    "/task text..., /details TASK-ID"
+    "/task text..., /details TASK-ID, /help"
 )
 
 
@@ -133,7 +134,7 @@ def parse_command(text: str) -> tuple[str | None, list[str], str | None]:
     if command not in SUPPORTED_COMMANDS:
         return None, [], HELP_TEXT
     rest = stripped[len(command) :].strip()
-    if command in {"/status", "/pause", "/resume"}:
+    if command in {"/status", "/pause", "/resume", "/help"}:
         return command, rest.split() if rest else [], None
     if command == "/approve":
         return command, rest.split() if rest else [], None
@@ -217,7 +218,14 @@ def process_update(update: dict[str, Any], allowed_chat_id: str) -> None:
     save_offset(update_id)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Poll Telegram once for strict local agent commands.")
+    parser.add_argument("--once", action="store_true", help="Poll once and exit. This is the default behavior.")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    build_parser().parse_args(argv[1:])
     ensure_dirs()
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -296,4 +304,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))
