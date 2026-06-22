@@ -116,11 +116,7 @@ Telegram approvals use the same gate. From the configured Telegram chat, send th
 /approve TASK-ID
 ```
 
-High-risk or token-gated approvals can include the optional token field:
-
-```text
-/approve TASK-ID TOKEN
-```
+The Telegram dispatcher does not require approval tokens. It accepts commands only from the configured chat and reuses `scripts/agent-approve.sh` when that helper is executable.
 
 ## Telegram Bridge
 
@@ -141,25 +137,28 @@ When `AGENT_NOTIFY_CHANNEL=telegram`, `scripts/agent-notify.sh` writes the norma
 Poll Telegram manually with a bounded one-shot command:
 
 ```bash
-python3 scripts/telegram-inbox.py
+python3 scripts/telegram-inbox.py --once
 ```
 
 The inbox poller calls Telegram Bot API `getUpdates` once, stores accepted raw updates as `.agent/inbox/telegram/update-<update_id>.json`, tracks the next offset in `.agent/state/telegram-offset.json`, and dispatches commands through `scripts/agent-command-dispatch.py` with argv lists only.
 
+In `--forever` mode, when `AGENT_NOTIFY_CHANNEL=telegram`, `scripts/agent-loop.sh` runs `python3 scripts/telegram-inbox.py --once` before each outer cycle. The inbox poll does not start Claude and does not run the loop by itself.
+
 Supported Telegram commands:
 
-- `/status`: Summarize branch, pause state, actionable task, pending approvals, and latest notification.
-- `/approve TASK-ID [TOKEN]`: Approve a proposed task through the existing approval helper when available.
+- `/status`: Summarize branch, pause state, actionable task, pending proposed tasks, implemented tasks, and latest notification.
+- `/approve TASK-ID`: Approve a proposed task through the existing approval helper when available.
 - `/reject TASK-ID reason`: Mark a task rejected and record the reason.
 - `/pause`: Create `.agent/PAUSED`; the loop will stop before starting a one-cycle run or sleep in forever mode.
 - `/resume`: Remove `.agent/PAUSED`.
 - `/goal text...`: Write a durable `.agent/inbox/human-goal-<timestamp>.md`.
 - `/task text...`: Write a durable `.agent/inbox/human-task-<timestamp>.md`.
 - `/details TASK-ID`: Return a concise task and approval/review summary.
+- `/help`: Return the supported command list.
 
 To pause the automation, send `/pause`. The next outer loop cycle records an `implementation_blocked` notification and stops in one-cycle mode or sleeps in forever mode. Send `/resume` to remove `.agent/PAUSED`.
 
-Use `/goal text...` for broader product direction and `/task text...` for a concrete requested task. Both are durable inbox files for the local workflow; they do not execute code or start the loop.
+Use `/goal text...` for broader product direction and `/task text...` for a concrete requested task. Both are durable inbox files for Codex planner review during the local workflow; they do not approve work, execute code, start Claude, or start the loop.
 
 Security rules:
 
@@ -236,10 +235,18 @@ Run the reviewer after implementation:
 scripts/codex-reviewer.sh TASK-ID
 ```
 
-The reviewer runs Codex in read-only mode and writes:
+The reviewer is wrapper-context-based, like the planner/materializer flow. The wrapper gathers current branch, git status, `git diff main...HEAD --stat`, `git diff main...HEAD`, the task JSON, `.agent/handoff.md` when present, operating rules, and the recent Claude implementer log path into:
+
+- `.agent/tmp/reviewer-context-<TASK-ID>-<timestamp>.md`
+
+Codex receives that gathered context and emits review JSON only. Shell commands, git/gh commands, and direct file inspection happen outside Codex in the wrapper. Codex must not modify files, inspect files directly, or recover missing context by running commands.
+
+The wrapper validates the JSON verdict and shape locally, then writes:
 
 - `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.json`
 - `.agent/reviews/REVIEW-<TASK-ID>-<timestamp>.md`
+
+If the wrapper cannot gather `git diff main...HEAD`, it does not invoke Codex. It writes a `blocked` review explaining that local wrapper diff gathering failed.
 
 The JSON verdict is one of:
 

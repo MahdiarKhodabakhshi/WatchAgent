@@ -136,6 +136,23 @@ check_paused_before_cycle() {
   return 0
 }
 
+poll_telegram_inbox_once() {
+  if [ "${AGENT_NOTIFY_CHANNEL:-}" != "telegram" ]; then
+    return 0
+  fi
+  if [ ! -f scripts/telegram-inbox.py ]; then
+    write_loop_event "telegram_inbox_missing" "none" "scripts/telegram-inbox.py is not present."
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    write_loop_event "telegram_inbox_skipped" "none" "python3 is not available for Telegram polling."
+    return 0
+  fi
+  if ! python3 scripts/telegram-inbox.py --once; then
+    write_loop_event "telegram_inbox_failed" "none" "Telegram inbox poll failed; continuing loop."
+  fi
+}
+
 refuse_main_branch() {
   local branch
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
@@ -625,6 +642,10 @@ run_cycle() {
 
 cycle=1
 while :; do
+  if [ "$forever" -eq 1 ]; then
+    poll_telegram_inbox_once
+  fi
+
   if check_paused_before_cycle; then
     if [ "$forever" -ne 1 ]; then
       printf 'Agent loop is paused by .agent/PAUSED. Send /resume from Telegram or remove .agent/PAUSED locally.\n'
