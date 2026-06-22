@@ -7,7 +7,7 @@
     "No evaluation metrics or README performance claims are changed."
   ],
   "approval_required": true,
-  "approved_by": null,
+  "approved_by": "human",
   "area": "backend-tests",
   "context": "Detector logic is a risky area, but the backlog explicitly calls for identifying small low-risk tests. This task is limited to tests that document existing behavior. It must not tune thresholds, alter scoring, change severity mapping, or modify lifecycle behavior.",
   "created_at": "2026-06-21T22:36:50Z",
@@ -38,12 +38,14 @@
   "objective": "Add focused regression tests for existing detector edge cases while preserving current thresholds, scoring, lifecycle behavior, and evaluation claims.",
   "risk": "low",
   "source": "codex-planner",
-  "status": "proposed",
+  "status": "in_progress",
   "task_id": "TASK-detector-edge-case-regression-tests",
   "test_plan": [
     "Run the touched detector test file directly, such as `pytest tests/test_native_detectors.py` or the specific file modified.",
     "Run adjacent detector contract/lifecycle tests if touched behavior crosses boundaries, such as `pytest tests/test_detection_contract.py tests/test_lifecycle.py`.",
     "Record commands and results in `.agent/handoff.md`."
   ],
-  "title": "Add detector edge-case regression tests without threshold changes"
+  "title": "Add detector edge-case regression tests without threshold changes",
+  "status_updated_at": "2026-06-22T05:38:35Z",
+  "status_reason": "Selected for implementation by the agent loop."
 }
